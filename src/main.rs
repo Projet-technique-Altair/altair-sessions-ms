@@ -1,26 +1,41 @@
-use axum::Router;
-use tokio::net::TcpListener;
+use axum::{
+    routing::{get, post},
+    Router,
+};
+use tower_http::cors::{Any, CorsLayer};
 
+mod error;
 mod models;
 mod routes;
+mod services;
 mod state;
 
-use routes::{sessions_routes, health_routes, metrics_routes};
-use state::AppState;
+use routes::{
+    health::health,
+    metrics::basic_metrics,
+    sessions::{get_sessions, start_session, stop_session},
+};
 
 #[tokio::main]
 async fn main() {
-    let state = AppState::new();
+    let state = state::AppState::new();
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     let app = Router::new()
-        .nest("/", sessions_routes())
-        .nest("/health", health_routes())
-        .nest("/metrics/basic", metrics_routes())
-        .with_state(state);
+        .route("/health", get(health))
+        .route("/metrics/basic", get(basic_metrics))
+        .route("/sessions", get(get_sessions))
+        .route("/sessions/start", post(start_session))
+        .route("/sessions/stop", post(stop_session))
+        .with_state(state)
+        .layer(cors);
 
-    let addr = "0.0.0.0:3003";
-    println!("Sessions-MS running on {}", addr);
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3003").await.unwrap();
+    println!("Sessions MS running on http://localhost:3003");
 
-    let listener = TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }

@@ -1,47 +1,56 @@
 use axum::{
-    Router,
-    routing::{post, get},
-    Json,
-    extract::{Path, State},
+    extract::{State, Json},
 };
-use serde_json::json;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
-    models::session::LabSession,
+    error::AppError,
+    models::session::Session,
     state::AppState,
 };
 
-pub fn sessions_routes() -> Router<AppState> {
-    Router::new()
-        .route("/labs/:lab_id/start", post(start_session))
-        .route("/sessions", get(list_sessions))
+/// GET /sessions
+pub async fn get_sessions(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Session>>, AppError> {
+    // MVP: fake logged-in user
+    let user_id = Uuid::new_v4();
+
+    let sessions = state.sessions_service.list_sessions(user_id);
+
+    Ok(Json(sessions))
 }
 
-async fn start_session(
-    Path(lab_id): Path<String>,
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
-
-    let mut sessions = state.sessions.lock().unwrap();
-
-    let session = LabSession {
-        session_id: Uuid::new_v4().to_string(),
-        user_id: "mock-user".into(),
-        lab_id,
-        container_id: "mock-container".into(),
-        status: "running".into(),
-        webshell_url: "ws://localhost:3000/ws/mock".into(),
-    };
-
-    sessions.push(session.clone());
-
-    Json(json!(session))
+#[derive(Deserialize)]
+pub struct StartSessionInput {
+    pub user_id: Uuid,
+    pub lab_id: Uuid,
 }
 
-async fn list_sessions(
+/// POST /sessions/start
+pub async fn start_session(
     State(state): State<AppState>,
-) -> Json<serde_json::Value> {
-    let sessions = state.sessions.lock().unwrap();
-    Json(json!(*sessions))
+    Json(input): Json<StartSessionInput>,
+) -> Result<Json<Session>, AppError> {
+    let session = state.sessions_service.start_session(input.user_id, input.lab_id);
+    Ok(Json(session))
+}
+
+#[derive(Deserialize)]
+pub struct StopSessionInput {
+    pub session_id: Uuid,
+}
+
+/// POST /sessions/stop
+pub async fn stop_session(
+    State(state): State<AppState>,
+    Json(input): Json<StopSessionInput>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    state.sessions_service.stop_session(input.session_id)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "stopped",
+        "session_id": input.session_id
+    })))
 }

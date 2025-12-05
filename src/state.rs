@@ -1,16 +1,14 @@
-use std::sync::{Arc, Mutex};
-
-use crate::models::session::LabSession;
+use crate::services::sessions_service::SessionsService;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub sessions: Arc<Mutex<Vec<LabSession>>>,
+    pub sessions_service: SessionsService,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
-            sessions: Arc::new(Mutex::new(vec![])),
+            sessions_service: SessionsService::new(),
         }
     }
 }
