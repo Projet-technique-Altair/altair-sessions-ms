@@ -10,15 +10,11 @@ use crate::{
     state::AppState,
 };
 
-/// GET /sessions
 pub async fn get_sessions(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Session>>, AppError> {
-    // MVP: fake logged-in user
-    let user_id = Uuid::new_v4();
-
+    let user_id = Uuid::new_v4(); // MVP mock
     let sessions = state.sessions_service.list_sessions(user_id);
-
     Ok(Json(sessions))
 }
 
@@ -28,12 +24,15 @@ pub struct StartSessionInput {
     pub lab_id: Uuid,
 }
 
-/// POST /sessions/start
 pub async fn start_session(
     State(state): State<AppState>,
     Json(input): Json<StartSessionInput>,
 ) -> Result<Json<Session>, AppError> {
-    let session = state.sessions_service.start_session(input.user_id, input.lab_id);
+    let session = state
+        .sessions_service
+        .start_session(input.user_id, input.lab_id)
+        .await?;
+
     Ok(Json(session))
 }
 
@@ -42,12 +41,13 @@ pub struct StopSessionInput {
     pub session_id: Uuid,
 }
 
-/// POST /sessions/stop
 pub async fn stop_session(
     State(state): State<AppState>,
     Json(input): Json<StopSessionInput>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    state.sessions_service.stop_session(input.session_id)?;
+    state.sessions_service
+        .stop_session(input.session_id)
+        .await?;
 
     Ok(Json(serde_json::json!({
         "status": "stopped",

@@ -1,24 +1,33 @@
-use axum::{http::StatusCode, response::IntoResponse, Json};
-use serde_json::{json, Value};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde::Serialize;
+use thiserror::Error;
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Error, Debug)]
 pub enum AppError {
-    #[error("Session not found")]
-    NotFound,
+    #[error("Internal error: {0}")]
+    Internal(String),
 
-    #[error("Internal error")]
-    Internal,
+    #[error("Bad request: {0}")]
+    BadRequest(String),
+
+    #[error("Resource not found: {0}")]
+    NotFound(String),
 }
 
 impl IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        let status = match self {
-            AppError::NotFound => StatusCode::NOT_FOUND,
-            AppError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    fn into_response(self) -> Response {
+        let (status, message) = match &self {
+            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
         };
 
-        let body: Json<Value> = Json(json!({
-            "error": self.to_string()
+        let body = Json(serde_json::json!({
+            "error": message
         }));
 
         (status, body).into_response()
