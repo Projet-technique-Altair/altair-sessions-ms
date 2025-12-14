@@ -1,20 +1,27 @@
 use axum::{
     extract::{State, Json},
 };
-use serde::Deserialize;
 use uuid::Uuid;
+use serde::Deserialize;
 
 use crate::{
-    error::AppError,
-    models::session::Session,
     state::AppState,
+    models::session::Session,
+    error::AppError,
 };
 
 pub async fn get_sessions(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Session>>, AppError> {
-    let user_id = Uuid::new_v4(); // MVP mock
-    let sessions = state.sessions_service.list_sessions(user_id);
+    // MVP : user mocké (remplacé par auth plus tard)
+    let user_id =
+        Uuid::parse_str("456796d9-a308-4fce-8659-b70c9e17985b").unwrap();
+
+    let sessions = state
+        .sessions_service
+        .list_sessions(user_id)
+        .await?;
+
     Ok(Json(sessions))
 }
 
@@ -45,7 +52,8 @@ pub async fn stop_session(
     State(state): State<AppState>,
     Json(input): Json<StopSessionInput>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    state.sessions_service
+    state
+        .sessions_service
         .stop_session(input.session_id)
         .await?;
 
