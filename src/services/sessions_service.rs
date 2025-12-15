@@ -26,33 +26,29 @@ impl SessionsService {
     }
 
     /// GET /sessions
-    pub async fn list_sessions(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<Session>, AppError> {
-        let sessions = sqlx::query_as::<_, Session>(
-            r#"
-            SELECT
-                session_id,
-                user_id,
-                lab_id,
-                container_id,
-                status,
-                webshell_url,
-                created_at,
-                expires_at
-            FROM lab_sessions
-            WHERE user_id = $1
-            ORDER BY created_at DESC
-            "#
-        )
-        .bind(user_id)
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    pub async fn list_sessions(&self) -> Result<Vec<Session>, AppError> {
+    let sessions = sqlx::query_as::<_, Session>(
+        r#"
+        SELECT
+            session_id,
+            user_id,
+            lab_id,
+            container_id,
+            status,
+            webshell_url,
+            created_at,
+            expires_at
+        FROM lab_sessions
+        ORDER BY created_at DESC
+        "#
+    )
+    .fetch_all(&self.db)
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        Ok(sessions)
-    }
+    Ok(sessions)
+}
+
 
     /// POST /sessions/start
     pub async fn start_session(

@@ -13,15 +13,7 @@ use crate::{
 pub async fn get_sessions(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Session>>, AppError> {
-    // MVP : user mocké (remplacé par auth plus tard)
-    let user_id =
-        Uuid::parse_str("456796d9-a308-4fce-8659-b70c9e17985b").unwrap();
-
-    let sessions = state
-        .sessions_service
-        .list_sessions(user_id)
-        .await?;
-
+    let sessions = state.sessions_service.list_sessions().await?;
     Ok(Json(sessions))
 }
 
