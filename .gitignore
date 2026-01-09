@@ -1,0 +1,17 @@
+# === Rust / Cargo ===
+target/
+Cargo.lock
+
+# === Logs ===
+*.log
+
+# === OS files ===
+.DS_Store
+Thumbs.db
+
+# === IDE ===
+.vscode/
+.idea/
+
+# === Other ===
+*.tmp
