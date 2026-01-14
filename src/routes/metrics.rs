@@ -5,11 +5,13 @@ use crate::error::AppError;
 use crate::models::api::{ApiMeta, ApiResponse};
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 pub struct Metrics {
     pub active_sessions: u32,
     pub spawn_attempts: u32,
 }
 
+#[allow(dead_code)]
 pub async fn basic_metrics() -> Result<impl IntoResponse, AppError> {
     let metrics = Metrics {
         active_sessions: 1,
