@@ -11,7 +11,6 @@ pub enum AppError {
     #[error("Resource not found: {0}")]
     NotFound(String),
 
-
     #[error("Internal error: {0}")]
     Internal(String),
 
