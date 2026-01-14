@@ -1,8 +1,4 @@
-use axum::{
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{http::StatusCode, response::IntoResponse, Json};
 
 use crate::models::api::{ApiMeta, ApiResponse};
 

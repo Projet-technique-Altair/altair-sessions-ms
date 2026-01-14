@@ -1,5 +1,5 @@
-use sqlx::PgPool;
 use crate::services::sessions_service::SessionsService;
+use sqlx::PgPool;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -8,8 +8,7 @@ pub struct AppState {
 
 impl AppState {
     pub async fn new() -> Self {
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
         let db = PgPool::connect(&database_url)
             .await

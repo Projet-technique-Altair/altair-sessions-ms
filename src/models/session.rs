@@ -1,8 +1,7 @@
-use serde::{Serialize, Deserialize};
-use uuid::Uuid;
-use sqlx::FromRow;
 use crate::error::AppError;
-
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -13,8 +12,6 @@ pub enum SessionStatus {
     Expired,
     Error,
 }
-
-
 
 #[derive(Debug, Clone, FromRow)]
 pub struct SessionRow {
@@ -28,8 +25,6 @@ pub struct SessionRow {
     pub expires_at: Option<chrono::NaiveDateTime>,
 }
 
-
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Session {
     pub session_id: Uuid,
@@ -42,8 +37,6 @@ pub struct Session {
     pub created_at: chrono::NaiveDateTime,
     pub expires_at: Option<chrono::NaiveDateTime>,
 }
-
-
 
 impl TryFrom<SessionRow> for Session {
     type Error = AppError;
@@ -61,7 +54,6 @@ impl TryFrom<SessionRow> for Session {
                 )))
             }
         };
-
 
         Ok(Session {
             session_id: row.session_id,

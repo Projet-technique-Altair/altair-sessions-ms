@@ -1,12 +1,11 @@
-use sqlx::{PgPool, Row};
-use uuid::Uuid;
 use reqwest::Client;
 use serde::Deserialize;
-
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
 
 use crate::{
-    models::session::{Session, SessionRow, SessionStatus},
     error::AppError,
+    models::session::{Session, SessionRow, SessionStatus},
 };
 
 #[derive(Clone)]
@@ -26,14 +25,8 @@ impl SessionsService {
         }
     }
 
-
     /// POST /labs/:id/start
-    pub async fn start_session(
-        &self,
-        user_id: Uuid,
-        lab_id: Uuid,
-    ) -> Result<Session, AppError> {
-
+    pub async fn start_session(&self, user_id: Uuid, lab_id: Uuid) -> Result<Session, AppError> {
         // 1️⃣ Unicité : aucune session active
         let existing = sqlx::query_scalar::<_, i64>(
             r#"
@@ -42,7 +35,7 @@ impl SessionsService {
             WHERE user_id = $1
             AND lab_id = $2
             AND status IN ('created', 'running')
-            "#
+            "#,
         )
         .bind(user_id)
         .bind(lab_id)
@@ -64,7 +57,7 @@ impl SessionsService {
             )
             VALUES ($1, $2, 'created')
             RETURNING *
-            "#
+            "#,
         )
         .bind(user_id)
         .bind(lab_id)
@@ -75,7 +68,8 @@ impl SessionsService {
         let mut session = Session::try_from(row)?;
 
         // 3️⃣ Spawn container
-        let spawn_result = self.client
+        let spawn_result = self
+            .client
             .post(format!("{}/spawn", self.lab_api_url))
             .json(&serde_json::json!({ "lab_id": lab_id }))
             .send()
@@ -83,10 +77,9 @@ impl SessionsService {
 
         match spawn_result {
             Ok(resp) => {
-                let spawn: SpawnResponse = resp
-                    .json()
-                    .await
-                    .map_err(|_| AppError::Internal("Invalid response from lab-api-service".into()))?;
+                let spawn: SpawnResponse = resp.json().await.map_err(|_| {
+                    AppError::Internal("Invalid response from lab-api-service".into())
+                })?;
 
                 // 4️⃣ Transition CREATED → RUNNING
                 Self::validate_transition(session.status, SessionStatus::Running)?;
@@ -99,7 +92,7 @@ impl SessionsService {
                         container_id = $1,
                         webshell_url = $2
                     WHERE session_id = $3
-                    "#
+                    "#,
                 )
                 .bind(&spawn.container_id)
                 .bind(&spawn.webshell_url)
@@ -118,7 +111,7 @@ impl SessionsService {
                     UPDATE lab_sessions
                     SET status = 'error'
                     WHERE session_id = $1
-                    "#
+                    "#,
                 )
                 .bind(session.session_id)
                 .execute(&self.db)
@@ -131,21 +124,15 @@ impl SessionsService {
         self.get_session_by_id(session.session_id).await
     }
 
-
-
     /// DELETE /sessions/:id
-    pub async fn stop_session(
-        &self,
-        session_id: Uuid,
-    ) -> Result<(), AppError> {
-
+    pub async fn stop_session(&self, session_id: Uuid) -> Result<(), AppError> {
         // 1️⃣ Load session
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
             SELECT *
             FROM lab_sessions
             WHERE session_id = $1
-            "#
+            "#,
         )
         .bind(session_id)
         .fetch_one(&self.db)
@@ -187,7 +174,7 @@ impl SessionsService {
             UPDATE lab_sessions
             SET status = 'stopped'
             WHERE session_id = $1
-            "#
+            "#,
         )
         .bind(session_id)
         .execute(&self.db)
@@ -197,19 +184,14 @@ impl SessionsService {
         Ok(())
     }
 
-
-
     /// GET /sessions/:id
-    pub async fn get_session_by_id(
-        &self,
-        session_id: Uuid,
-    ) -> Result<Session, AppError> {
+    pub async fn get_session_by_id(&self, session_id: Uuid) -> Result<Session, AppError> {
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
             SELECT *
             FROM lab_sessions
             WHERE session_id = $1
-            "#
+            "#,
         )
         .bind(session_id)
         .fetch_one(&self.db)
@@ -219,56 +201,41 @@ impl SessionsService {
         Ok(Session::try_from(row)?)
     }
 
-
     // GET /sessions/lab/:id
-    pub async fn get_sessions_by_lab(
-        &self,
-        lab_id: Uuid,
-    ) -> Result<Vec<Session>, AppError> {
+    pub async fn get_sessions_by_lab(&self, lab_id: Uuid) -> Result<Vec<Session>, AppError> {
         let rows = sqlx::query_as::<_, SessionRow>(
             r#"
             SELECT *
             FROM lab_sessions
             WHERE lab_id = $1
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(lab_id)
         .fetch_all(&self.db)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        rows
-            .into_iter()
-            .map(Session::try_from)
-            .collect()
+        rows.into_iter().map(Session::try_from).collect()
     }
 
-
     //GET /sessions/user/:id
-    pub async fn get_sessions_by_user(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<Session>, AppError> {
+    pub async fn get_sessions_by_user(&self, user_id: Uuid) -> Result<Vec<Session>, AppError> {
         let rows = sqlx::query_as::<_, SessionRow>(
             r#"
             SELECT *
             FROM lab_sessions
             WHERE user_id = $1
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(user_id)
         .fetch_all(&self.db)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        rows
-            .into_iter()
-            .map(Session::try_from)
-            .collect()
+        rows.into_iter().map(Session::try_from).collect()
     }
-
 
     fn validate_transition(from: SessionStatus, to: SessionStatus) -> Result<(), AppError> {
         use SessionStatus::*;
@@ -293,23 +260,21 @@ impl SessionsService {
     }
 
     fn is_terminal(status: SessionStatus) -> bool {
-        matches!(status, SessionStatus::Stopped | SessionStatus::Expired | SessionStatus::Error)
+        matches!(
+            status,
+            SessionStatus::Stopped | SessionStatus::Expired | SessionStatus::Error
+        )
     }
 
-
     //EXPIRE SESSION
-    pub async fn expire_session(
-        &self,
-        session_id: Uuid,
-    ) -> Result<(), AppError> {
-
+    pub async fn expire_session(&self, session_id: Uuid) -> Result<(), AppError> {
         // 1️⃣ Load session
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
             SELECT *
             FROM lab_sessions
             WHERE session_id = $1
-            "#
+            "#,
         )
         .bind(session_id)
         .fetch_one(&self.db)
@@ -333,7 +298,8 @@ impl SessionsService {
 
         // 5️⃣ Stop container (best effort)
         if let Some(container_id) = Some(&session.container_id) {
-            let _ = self.client
+            let _ = self
+                .client
                 .post(format!("{}/spawn/stop", self.lab_api_url))
                 .json(&serde_json::json!({
                     "container_id": container_id
@@ -350,7 +316,7 @@ impl SessionsService {
             SET status = 'expired',
                 expires_at = NOW()
             WHERE session_id = $1
-            "#
+            "#,
         )
         .bind(session_id)
         .execute(&self.db)
@@ -360,13 +326,8 @@ impl SessionsService {
         Ok(())
     }
 
-
-
     // CRON
-    pub async fn expire_all_expired_sessions(
-        &self,
-    ) -> Result<usize, AppError> {
-
+    pub async fn expire_all_expired_sessions(&self) -> Result<usize, AppError> {
         // 1️⃣ Sélectionner les sessions RUNNING dépassant le timeout
         let rows = sqlx::query_as::<_, SessionRow>(
             r#"
@@ -376,7 +337,7 @@ impl SessionsService {
             AND (
                 created_at + INTERVAL '2 hours'
             ) < NOW()
-            "#
+            "#,
         )
         .fetch_all(&self.db)
         .await
@@ -401,9 +362,6 @@ impl SessionsService {
 
         Ok(expired_count)
     }
-
-
-
 }
 
 #[derive(Deserialize)]

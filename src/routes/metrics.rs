@@ -1,8 +1,8 @@
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
 
-use crate::models::api::{ApiMeta, ApiResponse};
 use crate::error::AppError;
+use crate::models::api::{ApiMeta, ApiResponse};
 
 #[derive(Serialize)]
 pub struct Metrics {
