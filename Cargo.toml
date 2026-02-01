@@ -25,11 +25,12 @@ sqlx = { version = "0.8", features = [
   "runtime-tokio",
   "postgres",
   "uuid",
-  "chrono"
+  "chrono",
+  "tls-rustls"
 ] }
 
 # ✅ HTTP client (ONLY because sessions-ms orchestrates lab-api-service)
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Dates
 chrono = { version = "0.4", features = ["serde"] }
