@@ -1,0 +1,197 @@
+### ========================================
+### Sessions Microservice - Test Requests
+### ========================================
+### Base URL: http://localhost:3003
+### Requires: Labs MS (http://localhost:3002) and Lab API Service (http://localhost:8085)
+### ========================================
+
+### Variables
+@baseUrl = http://localhost:3003
+@labsMsUrl = http://localhost:3002
+@labApiUrl = http://localhost:8085
+
+# Replace these with actual UUIDs from your database
+@userId = 00000000-0000-0000-0000-000000000001
+@labId = 102d13b9-b15c-4b5c-9a22-1d758bfbb562
+@sessionId = d4b1380f-f698-4d0d-8528-b75368a4dce3
+
+### ========================================
+### Health Check
+### ========================================
+
+### Check if sessions microservice is healthy
+GET {{baseUrl}}/health
+
+### ========================================
+### Session Lifecycle
+### ========================================
+
+### Start a new lab session
+### NOTE: Requires a valid lab_id from labs-ms and will spawn a container via lab-api-service
+POST {{baseUrl}}/labs/{{labId}}/start
+Content-Type: application/json
+X-User-Id: {{userId}}
+
+### Get session by ID
+GET {{baseUrl}}/sessions/{{sessionId}}
+X-User-Id: {{userId}}
+
+### Get all sessions for a user
+GET {{baseUrl}}/sessions/user/{{userId}}
+X-User-Id: {{userId}}
+
+### Get all sessions for a lab (for lab creators)
+GET {{baseUrl}}/sessions/lab/{{labId}}
+X-User-Id: {{userId}}
+
+### ========================================
+### Session Progress & CTF
+### ========================================
+
+### Get session progress
+GET {{baseUrl}}/sessions/{{sessionId}}/progress
+X-User-Id: {{userId}}
+
+### Validate a step (submit an answer)
+POST {{baseUrl}}/sessions/{{sessionId}}/validate-step
+Content-Type: application/json
+X-User-Id: {{userId}}
+
+{
+  "step_number": 1,
+  "user_answer": "your_answer_here"
+}
+
+### Request a hint for a step
+POST {{baseUrl}}/sessions/{{sessionId}}/request-hint
+Content-Type: application/json
+X-User-Id: {{userId}}
+
+{
+  "step_number": 1,
+  "hint_number": 1
+}
+
+### Complete session (after all steps are done)
+POST {{baseUrl}}/sessions/{{sessionId}}/complete
+Content-Type: application/json
+X-User-Id: {{userId}}
+
+### ========================================
+### Stop/Delete Session
+### ========================================
+
+### Stop a running session (will stop the container)
+DELETE {{baseUrl}}/sessions/{{sessionId}}
+X-User-Id: {{userId}}
+
+### ========================================
+### Internal / CRON Endpoints
+### ========================================
+
+### Expire all sessions that have exceeded timeout (2 hours)
+### This is meant to be called by a CRON job
+POST {{baseUrl}}/internal/cron/expire
+X-User-Id: {{userId}}
+
+### ========================================
+### Helper Requests - Labs MS (for setup)
+### ========================================
+
+### Get all labs (to find a lab_id to use)
+GET {{labsMsUrl}}/labs
+
+### Get a specific lab
+GET {{labsMsUrl}}/labs/{{labId}}
+
+### Get steps for a lab
+GET {{labsMsUrl}}/labs/{{labId}}/steps
+
+### Create a test lab (if needed)
+POST {{labsMsUrl}}/labs
+Content-Type: application/json
+
+{
+  "name": "Test Lab - Path Hijacking",
+  "description": "A guided CTF lab for learning path hijacking attacks",
+  "difficulty": "easy",
+  "template_path": "altair/lab-path-hijacking-guided:v1",
+  "lab_type": "ctf_terminal_guided",
+  "estimated_duration": "30 minutes"
+}
+
+### Create a step for the test lab
+POST {{labsMsUrl}}/labs/{{labId}}/steps
+Content-Type: application/json
+
+{
+  "step_number": 1,
+  "title": "Find the vulnerable binary",
+  "description": "Look for a SUID binary that uses a relative path",
+  "question": "What is the name of the vulnerable binary?",
+  "expected_answer": "vulnerable_program",
+  "validation_type": "exact_match",
+  "points": 10
+}
+
+### ========================================
+### Helper Requests - Lab API Service
+### ========================================
+
+### Check lab-api-service health
+GET {{labApiUrl}}/health
+
+### Manually spawn a lab container (for testing)
+POST {{labApiUrl}}/spawn
+Content-Type: application/json
+
+{
+  "session_id": "{{sessionId}}",
+  "lab_type": "ctf_terminal_guided",
+  "template_path": "altair/lab-path-hijacking-guided:v1"
+}
+
+### Check container status
+GET {{labApiUrl}}/spawn/status/ctf-session-{{sessionId}}
+
+### Stop a container manually
+POST {{labApiUrl}}/spawn/stop
+Content-Type: application/json
+
+{
+  "container_id": "ctf-session-{{sessionId}}"
+}
+
+### ========================================
+### Full Integration Test Flow
+### ========================================
+
+### STEP 1: Create a lab in labs-ms (if not exists)
+# POST {{labsMsUrl}}/labs
+# ...
+
+### STEP 2: Add steps to the lab
+# POST {{labsMsUrl}}/labs/{{labId}}/steps
+# ...
+
+### STEP 3: Start a session (this will spawn a container)
+# POST {{baseUrl}}/labs/{{labId}}/start
+# ...
+
+### STEP 4: Get session progress
+# GET {{baseUrl}}/sessions/{{sessionId}}/progress
+# ...
+
+### STEP 5: Validate step 1
+# POST {{baseUrl}}/sessions/{{sessionId}}/validate-step
+# { "step_number": 1, "user_answer": "..." }
+
+### STEP 6: Request hint if stuck
+# POST {{baseUrl}}/sessions/{{sessionId}}/request-hint
+# { "step_number": 1, "hint_number": 1 }
+
+### STEP 7: Complete session when all steps done
+# POST {{baseUrl}}/sessions/{{sessionId}}/complete
+
+### STEP 8: Session is automatically stopped, or manually stop it
+# DELETE {{baseUrl}}/sessions/{{sessionId}}
