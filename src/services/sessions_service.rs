@@ -27,6 +27,17 @@ pub struct SessionsService {
     labs_ms_url: String,
 }
 
+use serde::Serialize;
+use serde_json::Value;
+
+#[derive(Serialize)]
+pub struct SessionWithSteps {
+    #[serde(flatten)]
+    pub session: Session,
+    pub steps: Vec<Value>,
+}
+
+
 // =====================================
 // Résultat métier de validate-step
 // =====================================
@@ -44,7 +55,8 @@ impl SessionsService {
             db,
             client: Client::new(),
             lab_api_url: std::env::var("LAB_API_URL")
-                .unwrap_or_else(|_| "http://localhost:8085".to_string()),
+                //.unwrap_or_else(|_| "http://localhost:8085".to_string()),
+                .unwrap_or_else(|_| "https://altair-lab-ms-390873516222.europe-west9.run.app/".to_string()),
             labs_ms_url: std::env::var("LABS_MS_URL")
                 .unwrap_or_else(|_| "http://localhost:3002".to_string()),
         }
@@ -74,9 +86,38 @@ impl SessionsService {
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        if existing > 0 {
+        /*if existing > 0 {
             return Err(AppError::Conflict("Session already active".into()));
+        }*/
+
+        if existing > 0 {
+            let row = sqlx::query_as::<_, SessionRow>(
+                r#"
+                SELECT *
+                FROM lab_sessions
+                WHERE user_id = $1
+                AND lab_id = $2
+                AND status IN ('created', 'running')
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#
+            )
+            .bind(user_id)
+            .bind(lab_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            let session = Session::try_from(row)?;
+
+            tx.commit()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            // ✅ "start" devient un "start or resume"
+            return Ok(session);
         }
+
 
         // 2️⃣ INSERT initial en CREATED
         let row = sqlx::query_as::<_, SessionRow>(
@@ -366,6 +407,33 @@ impl SessionsService {
 
         Ok(Session::try_from(row)?)
     }
+
+    pub async fn get_session_with_steps(&self, session_id: Uuid) -> Result<SessionWithSteps, AppError> {
+        // 1) Session DB
+        let session = self.get_session_by_id(session_id).await?;
+
+        // 2) Steps via Labs MS
+        let steps_resp = self
+            .client
+            .get(format!(
+                "{}/internal/labs/{}/steps/runtime",
+                self.labs_ms_url, session.lab_id
+            ))
+            .send()
+            .await
+            .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;
+
+        let steps = steps_resp["data"]
+            .as_array()
+            .ok_or_else(|| AppError::Internal("Labs steps missing".into()))?
+            .clone();
+
+        Ok(SessionWithSteps { session, steps })
+    }
+
 
     // GET /sessions/lab/:id
     pub async fn get_sessions_by_lab(&self, lab_id: Uuid) -> Result<Vec<Session>, AppError> {

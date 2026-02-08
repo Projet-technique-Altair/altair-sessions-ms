@@ -20,14 +20,29 @@ use crate::{
 // ======================================================
 // GET /sessions/:id (public)
 // ======================================================
-pub async fn get_session_by_id(
+/*pub async fn get_session_by_id(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<Session>>, AppError> {
     let session = state.sessions_service.get_session_by_id(session_id).await?;
 
     Ok(Json(ApiResponse::success(session)))
+}*/
+
+use crate::services::sessions_service::SessionWithSteps;
+
+pub async fn get_session_by_id(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<SessionWithSteps>>, AppError> {
+    let session = state
+        .sessions_service
+        .get_session_with_steps(session_id)
+        .await?;
+
+    Ok(Json(ApiResponse::success(session)))
 }
+
 
 // ======================================================
 // GET /sessions/user/:id (public)

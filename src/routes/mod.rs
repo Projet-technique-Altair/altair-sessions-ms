@@ -36,9 +36,6 @@ pub fn init_routes() -> Router<AppState> {
         .route("/sessions/user/:id", get(get_sessions_by_user))
         .route("/sessions/lab/:id", get(get_sessions_by_lab))
         // For CRON
-        .route(
-            "/internal/cron/expire",
-            post(internal::expire_sessions_cron),
-        )
+        .route("/internal/cron/expire", post(internal::expire_sessions_cron))
         .layer(middleware::from_fn(fake_auth))
 }
