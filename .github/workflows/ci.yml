@@ -1,84 +1,13 @@
-name: CI
+name: Sessions MS CI
 
 on:
-  pull_request:
-    branches: [main, develop]
   push:
     branches: [develop]
-
-env:
-  CARGO_TERM_COLOR: always
+  pull_request:
+    branches: [develop]
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
-
-    steps:
-      # ─────────────────────────────────────────────
-      # Checkout (historique complet requis pour gitleaks)
-      # ─────────────────────────────────────────────
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      # ─────────────────────────────────────────────
-      # Secret scanning — Gitleaks (CLI, sans licence)
-      # ─────────────────────────────────────────────
-      - name: Install gitleaks
-        run: |
-          curl -sSL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz
-          tar -xzf gitleaks.tar.gz
-          sudo mv gitleaks /usr/local/bin/gitleaks
-          gitleaks version
-
-      - name: Run gitleaks
-        run: |
-          gitleaks detect --source . --no-git
-
-      # ─────────────────────────────────────────────
-      # Rust toolchain
-      # ─────────────────────────────────────────────
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      # ─────────────────────────────────────────────
-      # Cache Cargo
-      # ─────────────────────────────────────────────
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo git
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache target
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
-
-      # ─────────────────────────────────────────────
-      # Quality checks
-      # ─────────────────────────────────────────────
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      # ─────────────────────────────────────────────
-      # Tests & build
-      # ─────────────────────────────────────────────
-      - name: Run tests
-        run: cargo test
-
-      - name: Build (release)
-        run: cargo build --release
+    uses: Projet-technique-Altair/altair-ci/.github/workflows/rust-ms.yml@v1
+    with:
+      rust_toolchain: stable
