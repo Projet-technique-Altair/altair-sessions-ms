@@ -26,7 +26,7 @@ async fn main() {
         .await
         .expect("Failed to bind port 3003");
 
-    println!("Sessions MS running on http://localhost:3003");
+    println!("Sessions MS running On http://localhost:3003");
 
     axum::serve(listener, app).await.unwrap();
 }
