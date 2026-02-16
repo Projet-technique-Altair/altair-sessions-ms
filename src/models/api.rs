@@ -45,3 +45,13 @@ impl<T> ApiResponse<T> {
         }
     }
 }
+
+impl ApiErrorResponse {
+    pub fn from_error(error: ApiError) -> Self {
+        Self {
+            success: false,
+            error,
+            meta: ApiMeta::new(),
+        }
+    }
+}

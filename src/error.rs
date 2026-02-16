@@ -11,6 +11,9 @@ pub enum AppError {
     #[error("Resource not found: {0}")]
     NotFound(String),
 
+    #[error("Bad request: {0}")]
+    BadRequest(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 
@@ -22,16 +25,25 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[error("Wrong answer")]
+    WrongAnswer { attempts: i32 },
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error_code, message) = match self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "RESOURCE_NOT_FOUND", msg),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg),
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", msg),
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, "FORBIDDEN", msg),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT", msg),
+            AppError::WrongAnswer { attempts } => (
+                StatusCode::BAD_REQUEST,
+                "WRONG_ANSWER",
+                format!("Wrong answer (attempts: {attempts})"),
+            ),
         };
 
         let error = ApiError {
