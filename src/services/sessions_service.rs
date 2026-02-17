@@ -2,6 +2,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
+use url::Url;
 
 use crate::{
     error::AppError,
@@ -22,7 +23,7 @@ pub struct SessionsService {
     db: PgPool,
     client: Client,
     /// URL for lab-api-service (Kubernetes/container management)
-    lab_api_url: String,
+    lab_api_base: Url,
     /// URL for labs-ms (lab metadata, steps, hints)
     labs_ms_url: String,
 }
@@ -51,16 +52,23 @@ pub struct ValidateStepResult {
 
 impl SessionsService {
     pub fn new(db: PgPool) -> Self {
+        let raw = std::env::var("LAB_API_URL")
+            .unwrap_or_else(|_| {
+                "https://altair-lab-ms-390873516222.europe-west9.run.app/".to_string()
+            });
+
+        let lab_api_base = Url::parse(&raw)
+            .expect("Invalid LAB_API_URL");
+
         Self {
             db,
             client: Client::new(),
-            lab_api_url: std::env::var("LAB_API_URL")
-                //.unwrap_or_else(|_| "http://localhost:8085".to_string()),
-                .unwrap_or_else(|_| "https://altair-lab-ms-390873516222.europe-west9.run.app/".to_string()),
+            lab_api_base,
             labs_ms_url: std::env::var("LABS_MS_URL")
                 .unwrap_or_else(|_| "http://localhost:3002".to_string()),
         }
     }
+
 
     /// POST /labs/:id/start
     pub async fn start_session(&self, user_id: Uuid, lab_id: Uuid) -> Result<Session, AppError> {
@@ -232,7 +240,7 @@ impl SessionsService {
             .to_string();
 
         // 4️⃣ Spawn container via lab-api-service
-        let spawn_result = self
+        /*let spawn_result = self
             .client
             .post(format!("{}/spawn", self.lab_api_url))
             .json(&serde_json::json!({
@@ -241,7 +249,24 @@ impl SessionsService {
                 "template_path": template_path
             }))
             .send()
+            .await;*/
+
+        let url = self
+            .lab_api_base
+            .join("spawn")
+            .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
+
+        let spawn_result = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({
+                "session_id": session.session_id,
+                "lab_type": lab_type,
+                "template_path": template_path
+            }))
+            .send()
             .await;
+
 
         match spawn_result {
             Ok(resp) if resp.status().is_success() => {
@@ -364,7 +389,7 @@ impl SessionsService {
         Self::validate_transition(session.status, SessionStatus::Stopped)?;
 
         // 5️⃣ Stop container (best effort)
-        if let Some(container_id) = &session.container_id {
+        /*if let Some(container_id) = &session.container_id {
             self.client
                 .post(format!("{}/spawn/stop", self.lab_api_url))
                 .json(&serde_json::json!({
@@ -373,7 +398,24 @@ impl SessionsService {
                 .send()
                 .await
                 .map_err(|e| AppError::Internal(format!("Stop call failed: {e}")))?;
+        }*/
+
+        if let Some(container_id) = &session.container_id {
+            let url = self
+                .lab_api_base
+                .join("spawn/stop")
+                .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
+
+            let _ = self
+                .client
+                .post(url)
+                .json(&serde_json::json!({
+                    "container_id": container_id
+                }))
+                .send()
+                .await;
         }
+
 
         // 6️⃣ Update DB
         sqlx::query(
@@ -531,7 +573,7 @@ impl SessionsService {
         Self::validate_transition(session.status, SessionStatus::Expired)?;
 
         // 5️⃣ Stop container (best effort)
-        if let Some(container_id) = &session.container_id {
+        /*if let Some(container_id) = &session.container_id {
             let _ = self
                 .client
                 .post(format!("{}/spawn/stop", self.lab_api_url))
@@ -541,7 +583,24 @@ impl SessionsService {
                 .send()
                 .await;
             // ⚠️ best effort: expiration must proceed even if runtime is down
+        }*/
+
+        if let Some(container_id) = &session.container_id {
+            let url = self
+                .lab_api_base
+                .join("spawn/stop")
+                .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
+
+            let _ = self
+                .client
+                .post(url)
+                .json(&serde_json::json!({
+                    "container_id": container_id
+                }))
+                .send()
+                .await;
         }
+
 
         // 6️⃣ Update DB
         sqlx::query(
@@ -994,11 +1053,27 @@ impl SessionsService {
         }
 
         // 5️⃣ Stop pod (best effort)
-        if let Some(container_id) = &session.container_id {
+        /*if let Some(container_id) = &session.container_id {
             let _ = self
                 .client
                 .post(format!("{}/spawn/stop", self.lab_api_url))
                 .json(&serde_json::json!({ "container_id": container_id }))
+                .send()
+                .await;
+        }*/
+
+        if let Some(container_id) = &session.container_id {
+            let url = self
+                .lab_api_base
+                .join("spawn/stop")
+                .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
+
+            let _ = self
+                .client
+                .post(url)
+                .json(&serde_json::json!({
+                    "container_id": container_id
+                }))
                 .send()
                 .await;
         }

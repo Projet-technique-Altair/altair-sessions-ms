@@ -5,6 +5,7 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 /// Représentation DB directe (sqlx)
+#[allow(dead_code)]
 #[derive(Debug, Clone, FromRow)]
 pub struct LabProgressRow {
     pub progress_id: Uuid,

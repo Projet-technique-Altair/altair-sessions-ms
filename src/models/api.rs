@@ -46,6 +46,7 @@ impl<T> ApiResponse<T> {
     }
 }
 
+#[allow(dead_code)]
 impl ApiErrorResponse {
     pub fn from_error(error: ApiError) -> Self {
         Self {

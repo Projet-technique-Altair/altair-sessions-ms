@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    Extension, Json,
+    Json,
 };
 use uuid::Uuid;
 use axum::http::HeaderMap;
