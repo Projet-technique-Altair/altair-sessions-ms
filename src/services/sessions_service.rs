@@ -25,7 +25,7 @@ pub struct SessionsService {
     /// URL for lab-api-service (Kubernetes/container management)
     lab_api_base: Url,
     /// URL for labs-ms (lab metadata, steps, hints)
-    labs_ms_url: String,
+    labs_ms_base: Url,
 }
 
 use serde::Serialize;
@@ -52,22 +52,28 @@ pub struct ValidateStepResult {
 
 impl SessionsService {
     pub fn new(db: PgPool) -> Self {
-        let raw = std::env::var("LAB_API_URL")
+        let raw_api = std::env::var("LAB_API_URL")
             .unwrap_or_else(|_| {
                 "https://altair-lab-ms-390873516222.europe-west9.run.app/".to_string()
             });
 
-        let lab_api_base = Url::parse(&raw)
-            .expect("Invalid LAB_API_URL");
+        let lab_api_base =
+            Url::parse(&raw_api).expect("Invalid LAB_API_URL");
+
+        let raw_labs = std::env::var("LABS_MS_URL")
+            .unwrap_or_else(|_| "http://localhost:3002/".to_string());
+
+        let labs_ms_base =
+            Url::parse(&raw_labs).expect("Invalid LABS_MS_URL");
 
         Self {
             db,
             client: Client::new(),
             lab_api_base,
-            labs_ms_url: std::env::var("LABS_MS_URL")
-                .unwrap_or_else(|_| "http://localhost:3002".to_string()),
+            labs_ms_base,
         }
     }
+
 
 
     /// POST /labs/:id/start
@@ -176,12 +182,14 @@ impl SessionsService {
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
         // 2️⃣ ter — Initialiser max_score et score depuis Labs MS
+        let url = self
+            .labs_ms_base
+            .join(&format!("internal/labs/{}/steps", lab_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
         let steps_resp = self
             .client
-            .get(format!(
-                "{}/internal/labs/{}/steps",
-                self.labs_ms_url, lab_id
-            ))
+            .get(url)
             .send()
             .await
             .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
@@ -215,9 +223,14 @@ impl SessionsService {
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
         // 3️⃣ Fetch lab info from Labs MS to get lab_type and template_path
+        let url = self
+            .labs_ms_base
+            .join(&format!("labs/{}", lab_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
         let lab_resp = self
             .client
-            .get(format!("{}/labs/{}", self.labs_ms_url, lab_id))
+            .get(url)
             .send()
             .await
             .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
@@ -455,12 +468,14 @@ impl SessionsService {
         let session = self.get_session_by_id(session_id).await?;
 
         // 2) Steps via Labs MS
+        let url = self
+            .labs_ms_base
+            .join(&format!("internal/labs/{}/steps/runtime", session.lab_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
         let steps_resp = self
             .client
-            .get(format!(
-                "{}/internal/labs/{}/steps/runtime",
-                self.labs_ms_url, session.lab_id
-            ))
+            .get(url)
             .send()
             .await
             .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
@@ -728,12 +743,14 @@ impl SessionsService {
         lab_id: Uuid,
         step_number: i32,
     ) -> Result<serde_json::Value, AppError> {
+        let url = self
+            .labs_ms_base
+            .join(&format!("internal/labs/{}/steps/{}", lab_id, step_number))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
         let resp = self
             .client
-            .get(format!(
-                "{}/internal/labs/{}/steps/{}",
-                self.labs_ms_url, lab_id, step_number
-            ))
+            .get(url)
             .send()
             .await
             .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
@@ -929,12 +946,14 @@ impl SessionsService {
             .ok_or_else(|| AppError::Internal("Missing step_id".into()))?;
 
         // 7️⃣ Charger les hints de la step
+        let url = self
+            .labs_ms_base
+            .join(&format!("labs/{}/steps/{}/hints", lab_id, step_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
         let hints_resp = self
             .client
-            .get(format!(
-                "{}/labs/{}/steps/{}/hints",
-                self.labs_ms_url, lab_id, step_id
-            ))
+            .get(url)
             .send()
             .await
             .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
@@ -1019,12 +1038,14 @@ impl SessionsService {
         .await
         .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;*/
 
+        let url = self
+            .labs_ms_base
+            .join(&format!("labs/{}/steps", session.lab_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
         let steps_resp = self
             .client
-            .get(format!(
-                "{}/labs/{}/steps",
-                self.labs_ms_url, session.lab_id
-            ))
+            .get(url)
             .send()
             .await
             .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
@@ -1126,11 +1147,12 @@ impl SessionsService {
         lab_id: Uuid,
     ) -> Result<Uuid, AppError> {
         crate::services::labs_client::fetch_lab_creator_id(
-            &self.labs_ms_url,
+            self.labs_ms_base.as_str(),
             lab_id,
         )
         .await
-    }
+}
+
 
 }
 
