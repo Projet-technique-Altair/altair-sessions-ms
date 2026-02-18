@@ -1,5 +1,0 @@
-[allowlist]
-paths = [
-  "target/",
-  ".git/",
-]

@@ -2,6 +2,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
+use url::Url;
 
 use crate::{
     error::AppError,
@@ -22,10 +23,21 @@ pub struct SessionsService {
     db: PgPool,
     client: Client,
     /// URL for lab-api-service (Kubernetes/container management)
-    lab_api_url: String,
+    lab_api_base: Url,
     /// URL for labs-ms (lab metadata, steps, hints)
-    labs_ms_url: String,
+    labs_ms_base: Url,
 }
+
+use serde::Serialize;
+use serde_json::Value;
+
+#[derive(Serialize)]
+pub struct SessionWithSteps {
+    #[serde(flatten)]
+    pub session: Session,
+    pub steps: Vec<Value>,
+}
+
 
 // =====================================
 // Résultat métier de validate-step
@@ -40,15 +52,29 @@ pub struct ValidateStepResult {
 
 impl SessionsService {
     pub fn new(db: PgPool) -> Self {
+        let raw_api = std::env::var("LAB_API_URL")
+            .unwrap_or_else(|_| {
+                "https://altair-lab-ms-390873516222.europe-west9.run.app/".to_string()
+            });
+
+        let lab_api_base =
+            Url::parse(&raw_api).expect("Invalid LAB_API_URL");
+
+        let raw_labs = std::env::var("LABS_MS_URL")
+            .unwrap_or_else(|_| "http://localhost:3002/".to_string());
+
+        let labs_ms_base =
+            Url::parse(&raw_labs).expect("Invalid LABS_MS_URL");
+
         Self {
             db,
             client: Client::new(),
-            lab_api_url: std::env::var("LAB_API_URL")
-                .unwrap_or_else(|_| "http://localhost:8085".to_string()),
-            labs_ms_url: std::env::var("LABS_MS_URL")
-                .unwrap_or_else(|_| "http://localhost:3002".to_string()),
+            lab_api_base,
+            labs_ms_base,
         }
     }
+
+
 
     /// POST /labs/:id/start
     pub async fn start_session(&self, user_id: Uuid, lab_id: Uuid) -> Result<Session, AppError> {
@@ -74,9 +100,38 @@ impl SessionsService {
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        if existing > 0 {
+        /*if existing > 0 {
             return Err(AppError::Conflict("Session already active".into()));
+        }*/
+
+        if existing > 0 {
+            let row = sqlx::query_as::<_, SessionRow>(
+                r#"
+                SELECT *
+                FROM lab_sessions
+                WHERE user_id = $1
+                AND lab_id = $2
+                AND status IN ('created', 'running')
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#
+            )
+            .bind(user_id)
+            .bind(lab_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            let session = Session::try_from(row)?;
+
+            tx.commit()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            // ✅ "start" devient un "start or resume"
+            return Ok(session);
         }
+
 
         // 2️⃣ INSERT initial en CREATED
         let row = sqlx::query_as::<_, SessionRow>(
@@ -127,12 +182,14 @@ impl SessionsService {
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
         // 2️⃣ ter — Initialiser max_score et score depuis Labs MS
+        let url = self
+            .labs_ms_base
+            .join(&format!("internal/labs/{}/steps", lab_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
         let steps_resp = self
             .client
-            .get(format!(
-                "{}/internal/labs/{}/steps",
-                self.labs_ms_url, lab_id
-            ))
+            .get(url)
             .send()
             .await
             .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
@@ -166,9 +223,14 @@ impl SessionsService {
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
         // 3️⃣ Fetch lab info from Labs MS to get lab_type and template_path
+        let url = self
+            .labs_ms_base
+            .join(&format!("labs/{}", lab_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
         let lab_resp = self
             .client
-            .get(format!("{}/labs/{}", self.labs_ms_url, lab_id))
+            .get(url)
             .send()
             .await
             .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
@@ -191,7 +253,7 @@ impl SessionsService {
             .to_string();
 
         // 4️⃣ Spawn container via lab-api-service
-        let spawn_result = self
+        /*let spawn_result = self
             .client
             .post(format!("{}/spawn", self.lab_api_url))
             .json(&serde_json::json!({
@@ -200,7 +262,24 @@ impl SessionsService {
                 "template_path": template_path
             }))
             .send()
+            .await;*/
+
+        let url = self
+            .lab_api_base
+            .join("spawn")
+            .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
+
+        let spawn_result = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({
+                "session_id": session.session_id,
+                "lab_type": lab_type,
+                "template_path": template_path
+            }))
+            .send()
             .await;
+
 
         match spawn_result {
             Ok(resp) if resp.status().is_success() => {
@@ -323,7 +402,7 @@ impl SessionsService {
         Self::validate_transition(session.status, SessionStatus::Stopped)?;
 
         // 5️⃣ Stop container (best effort)
-        if let Some(container_id) = &session.container_id {
+        /*if let Some(container_id) = &session.container_id {
             self.client
                 .post(format!("{}/spawn/stop", self.lab_api_url))
                 .json(&serde_json::json!({
@@ -332,7 +411,24 @@ impl SessionsService {
                 .send()
                 .await
                 .map_err(|e| AppError::Internal(format!("Stop call failed: {e}")))?;
+        }*/
+
+        if let Some(container_id) = &session.container_id {
+            let url = self
+                .lab_api_base
+                .join("spawn/stop")
+                .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
+
+            let _ = self
+                .client
+                .post(url)
+                .json(&serde_json::json!({
+                    "container_id": container_id
+                }))
+                .send()
+                .await;
         }
+
 
         // 6️⃣ Update DB
         sqlx::query(
@@ -366,6 +462,35 @@ impl SessionsService {
 
         Ok(Session::try_from(row)?)
     }
+
+    pub async fn get_session_with_steps(&self, session_id: Uuid) -> Result<SessionWithSteps, AppError> {
+        // 1) Session DB
+        let session = self.get_session_by_id(session_id).await?;
+
+        // 2) Steps via Labs MS
+        let url = self
+            .labs_ms_base
+            .join(&format!("internal/labs/{}/steps/runtime", session.lab_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
+        let steps_resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;
+
+        let steps = steps_resp["data"]
+            .as_array()
+            .ok_or_else(|| AppError::Internal("Labs steps missing".into()))?
+            .clone();
+
+        Ok(SessionWithSteps { session, steps })
+    }
+
 
     // GET /sessions/lab/:id
     pub async fn get_sessions_by_lab(&self, lab_id: Uuid) -> Result<Vec<Session>, AppError> {
@@ -463,7 +588,7 @@ impl SessionsService {
         Self::validate_transition(session.status, SessionStatus::Expired)?;
 
         // 5️⃣ Stop container (best effort)
-        if let Some(container_id) = &session.container_id {
+        /*if let Some(container_id) = &session.container_id {
             let _ = self
                 .client
                 .post(format!("{}/spawn/stop", self.lab_api_url))
@@ -473,7 +598,24 @@ impl SessionsService {
                 .send()
                 .await;
             // ⚠️ best effort: expiration must proceed even if runtime is down
+        }*/
+
+        if let Some(container_id) = &session.container_id {
+            let url = self
+                .lab_api_base
+                .join("spawn/stop")
+                .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
+
+            let _ = self
+                .client
+                .post(url)
+                .json(&serde_json::json!({
+                    "container_id": container_id
+                }))
+                .send()
+                .await;
         }
+
 
         // 6️⃣ Update DB
         sqlx::query(
@@ -601,12 +743,14 @@ impl SessionsService {
         lab_id: Uuid,
         step_number: i32,
     ) -> Result<serde_json::Value, AppError> {
+        let url = self
+            .labs_ms_base
+            .join(&format!("internal/labs/{}/steps/{}", lab_id, step_number))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
         let resp = self
             .client
-            .get(format!(
-                "{}/internal/labs/{}/steps/{}",
-                self.labs_ms_url, lab_id, step_number
-            ))
+            .get(url)
             .send()
             .await
             .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
@@ -802,12 +946,14 @@ impl SessionsService {
             .ok_or_else(|| AppError::Internal("Missing step_id".into()))?;
 
         // 7️⃣ Charger les hints de la step
+        let url = self
+            .labs_ms_base
+            .join(&format!("labs/{}/steps/{}/hints", lab_id, step_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
         let hints_resp = self
             .client
-            .get(format!(
-                "{}/labs/{}/steps/{}/hints",
-                self.labs_ms_url, lab_id, step_id
-            ))
+            .get(url)
             .send()
             .await
             .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
@@ -892,12 +1038,14 @@ impl SessionsService {
         .await
         .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;*/
 
+        let url = self
+            .labs_ms_base
+            .join(&format!("labs/{}/steps", session.lab_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
         let steps_resp = self
             .client
-            .get(format!(
-                "{}/labs/{}/steps",
-                self.labs_ms_url, session.lab_id
-            ))
+            .get(url)
             .send()
             .await
             .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
@@ -926,11 +1074,27 @@ impl SessionsService {
         }
 
         // 5️⃣ Stop pod (best effort)
-        if let Some(container_id) = &session.container_id {
+        /*if let Some(container_id) = &session.container_id {
             let _ = self
                 .client
                 .post(format!("{}/spawn/stop", self.lab_api_url))
                 .json(&serde_json::json!({ "container_id": container_id }))
+                .send()
+                .await;
+        }*/
+
+        if let Some(container_id) = &session.container_id {
+            let url = self
+                .lab_api_base
+                .join("spawn/stop")
+                .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
+
+            let _ = self
+                .client
+                .post(url)
+                .json(&serde_json::json!({
+                    "container_id": container_id
+                }))
                 .send()
                 .await;
         }
@@ -977,6 +1141,19 @@ impl SessionsService {
             "total_attempts": total_attempts
         }))
     }
+
+    pub async fn fetch_lab_creator_id(
+        &self,
+        lab_id: Uuid,
+    ) -> Result<Uuid, AppError> {
+        crate::services::labs_client::fetch_lab_creator_id(
+            self.labs_ms_base.as_str(),
+            lab_id,
+        )
+        .await
+}
+
+
 }
 
 #[derive(Deserialize)]

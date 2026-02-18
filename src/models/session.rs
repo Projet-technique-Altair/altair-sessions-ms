@@ -18,9 +18,11 @@ pub struct SessionRow {
     pub session_id: Uuid,
     pub user_id: Uuid,
     pub lab_id: Uuid,
-    pub container_id: String,
-    pub status: String, // ← DB (snake_case)
-    pub webshell_url: String,
+
+    pub container_id: Option<String>,
+    pub status: String, // DB value (lowercase string)
+    pub webshell_url: Option<String>,
+
     pub created_at: chrono::NaiveDateTime,
     pub expires_at: Option<chrono::NaiveDateTime>,
 }
@@ -30,9 +32,10 @@ pub struct Session {
     pub session_id: Uuid,
     pub user_id: Uuid,
     pub lab_id: Uuid,
-    pub container_id: String,
-    pub status: SessionStatus, // API enum
-    pub webshell_url: String,
+
+    pub container_id: Option<String>,
+    pub status: SessionStatus,
+    pub webshell_url: Option<String>,
 
     pub created_at: chrono::NaiveDateTime,
     pub expires_at: Option<chrono::NaiveDateTime>,
@@ -66,4 +69,16 @@ impl TryFrom<SessionRow> for Session {
             expires_at: row.expires_at,
         })
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ValidateStepRequest {
+    pub step_number: i32,
+    pub user_answer: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RequestHintRequest {
+    pub step_number: i32,
+    pub hint_number: i32,
 }
