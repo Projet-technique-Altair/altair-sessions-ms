@@ -1,0 +1,16 @@
+name: Sessions MS CI
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: Projet-technique-Altair/altair-ci/.github/workflows/rust-ms.yml@v1
+    with:
+      rust_toolchain: stable
