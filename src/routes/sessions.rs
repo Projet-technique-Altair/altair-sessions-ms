@@ -13,7 +13,6 @@ use crate::{
         lab_progress::LabProgress,
         session::{RequestHintRequest, Session, ValidateStepRequest},
     },
-    services::labs_client::fetch_lab_creator_id,
     state::AppState,
 };
 
@@ -396,4 +395,3 @@ pub async fn complete_session(
 
     Ok(Json(ApiResponse::success(stats)))
 }
-

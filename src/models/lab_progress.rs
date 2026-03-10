@@ -30,6 +30,7 @@ pub struct LabProgress {
 
     pub current_step: i32,
     pub completed_steps: Vec<i32>,
+    pub hints_used: Vec<String>,
 
     pub attempts: i32,
     pub score: i32,
@@ -47,6 +48,17 @@ impl LabProgress {
             .map(|m| m.values().filter_map(|v| v.as_i64()).sum::<i64>())
             .unwrap_or(0) as i32;
 
+        let hints_used = row
+            .hints_used
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
         let now = chrono::Utc::now().naive_utc();
         let time_elapsed = (now - session_created_at).num_seconds();
 
@@ -54,6 +66,7 @@ impl LabProgress {
             session_id: row.session_id,
             current_step: row.current_step,
             completed_steps: row.completed_steps,
+            hints_used,
             attempts,
             score: row.score,
             max_score: row.max_score,
