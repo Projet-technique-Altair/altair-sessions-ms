@@ -833,6 +833,50 @@ impl SessionsService {
 
         let points = step["points"].as_i64().unwrap_or(0) as i32;
 
+        let step_id = step["step_id"]
+            .as_str()
+            .ok_or_else(|| AppError::Internal("Missing step_id".into()))?;
+
+        let hints_url = self
+            .labs_ms_base
+            .join(&format!("labs/{}/steps/{}/hints", lab_id, step_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
+        let hints_resp = self
+            .client
+            .get(hints_url)
+            .send()
+            .await
+            .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;
+
+        let lab_hints = hints_resp["data"]
+            .as_array()
+            .ok_or_else(|| AppError::Internal("Labs hints missing".into()))?;
+
+        let used_hint_keys = progress
+            .hints_used
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        let total_hint_cost = lab_hints
+            .iter()
+            .filter(|hint| {
+                let hint_number = hint["hint_number"].as_i64().unwrap_or_default();
+                let hint_key = format!("{}_{}", step_number, hint_number);
+
+                used_hint_keys
+                    .iter()
+                    .any(|used| used.as_str() == Some(hint_key.as_str()))
+            })
+            .map(|hint| hint["cost"].as_i64().unwrap_or(0) as i32)
+            .sum::<i32>();
+
+        let effective_points = (points - total_hint_cost).max(0);
+
         // 7️⃣ Validation
         let correct = match validation_type {
             ValidationType::ExactMatch => user_answer.trim() == expected_answer,
@@ -857,7 +901,7 @@ impl SessionsService {
             )
             .bind(step_number)
             .bind(&attempts)
-            .bind(points)
+            .bind(effective_points)
             .bind(session_id)
             .execute(&self.db)
             .await
@@ -881,7 +925,7 @@ impl SessionsService {
         Ok(ValidateStepResult {
             correct,
             attempts: new_attempts as i32,
-            points_earned: if correct { points } else { 0 },
+            points_earned: if correct { effective_points } else { 0 },
             current_step: if correct {
                 progress.current_step + 1
             } else {
@@ -976,26 +1020,22 @@ impl SessionsService {
         // 7️⃣ Mise à jour score + hints_used
         hints.push(serde_json::json!(hint_key));
 
-        let new_score = (progress.score - cost).max(0);
-
         sqlx::query(
             r#"
             UPDATE lab_progress
             SET
-                hints_used = $1,
-                score = $2
-            WHERE session_id = $3
+                hints_used = $1
+            WHERE session_id = $2
             "#
         )
         .bind(serde_json::Value::Array(hints.clone()))
-        .bind(new_score)
         .bind(session_id)
         .execute(&self.db)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
 
-        Ok((hint_text, cost, new_score))
+        Ok((hint_text, cost, progress.score))
     }
 
     pub async fn complete_session(&self, session_id: Uuid) -> Result<serde_json::Value, AppError> {
