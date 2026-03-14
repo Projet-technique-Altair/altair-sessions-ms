@@ -23,7 +23,7 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/release/altair-sessions-ms /app/altair-sessions-ms
 
-EXPOSE 3001
+EXPOSE 3003
 
 ENV RUST_LOG=info
 ENV RUST_BACKTRACE=1
