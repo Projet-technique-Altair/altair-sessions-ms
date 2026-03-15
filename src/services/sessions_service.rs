@@ -54,7 +54,7 @@ impl SessionsService {
     pub fn new(db: PgPool) -> Self {
         let raw_api = std::env::var("LAB_API_URL")
             .unwrap_or_else(|_| {
-                "https://altair-lab-ms-390873516222.europe-west9.run.app/".to_string()
+                "http://localhost:8085/".to_string()
             });
 
         let lab_api_base =
