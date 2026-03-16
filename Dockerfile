@@ -1,7 +1,7 @@
 # =======================
 # Builder
 # =======================
-FROM rustlang/rust:nightly AS builder
+FROM rust:1.92-bookworm AS builder
 
 WORKDIR /app
 
