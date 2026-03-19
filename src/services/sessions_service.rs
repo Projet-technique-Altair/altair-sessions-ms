@@ -296,12 +296,16 @@ impl SessionsService {
                     SET
                         status = 'running',
                         container_id = $1,
-                        webshell_url = $2
-                    WHERE session_id = $3
+                        runtime_kind = $2,
+                        webshell_url = $3,
+                        app_url = $4
+                    WHERE session_id = $5
                     "#,
                 )
-                .bind(&spawn.data.pod_name)
+                .bind(&spawn.data.container_id)
+                .bind(&spawn.data.runtime_kind)
                 .bind(&spawn.data.webshell_url)
+                .bind(&spawn.data.app_url)
                 .bind(session.session_id)
                 .execute(&mut *tx)
                 .await
@@ -1205,8 +1209,10 @@ struct SpawnResponse {
 
 #[derive(Deserialize)]
 struct SpawnResponseData {
-    pod_name: String,
-    webshell_url: String,
+    container_id: String,
+    runtime_kind: String,
+    webshell_url: Option<String>,
+    app_url: Option<String>,
     #[allow(dead_code)]
     status: String,
 }
