@@ -251,6 +251,10 @@ impl SessionsService {
             .as_str()
             .ok_or_else(|| AppError::Internal("Lab template_path missing".into()))?
             .to_string();
+        let lab_delivery = lab_data["lab_delivery"]
+            .as_str()
+            .ok_or_else(|| AppError::Internal("Lab lab_delivery missing".into()))?
+            .to_string();
 
         // 4️⃣ Spawn container via lab-api-service
         /*let spawn_result = self
@@ -275,7 +279,8 @@ impl SessionsService {
             .json(&serde_json::json!({
                 "session_id": session.session_id,
                 "lab_type": lab_type,
-                "template_path": template_path
+                "template_path": template_path,
+                "lab_delivery": lab_delivery
             }))
             .send()
             .await;
