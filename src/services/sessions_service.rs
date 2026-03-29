@@ -251,6 +251,10 @@ impl SessionsService {
             .as_str()
             .ok_or_else(|| AppError::Internal("Lab template_path missing".into()))?
             .to_string();
+        let lab_delivery = lab_data["lab_delivery"]
+            .as_str()
+            .ok_or_else(|| AppError::Internal("Lab lab_delivery missing".into()))?
+            .to_string();
 
         // 4️⃣ Spawn container via lab-api-service
         /*let spawn_result = self
@@ -275,7 +279,8 @@ impl SessionsService {
             .json(&serde_json::json!({
                 "session_id": session.session_id,
                 "lab_type": lab_type,
-                "template_path": template_path
+                "template_path": template_path,
+                "lab_delivery": lab_delivery
             }))
             .send()
             .await;
@@ -296,12 +301,16 @@ impl SessionsService {
                     SET
                         status = 'running',
                         container_id = $1,
-                        webshell_url = $2
-                    WHERE session_id = $3
+                        runtime_kind = $2,
+                        webshell_url = $3,
+                        app_url = $4
+                    WHERE session_id = $5
                     "#,
                 )
-                .bind(&spawn.data.pod_name)
+                .bind(&spawn.data.container_id)
+                .bind(&spawn.data.runtime_kind)
                 .bind(&spawn.data.webshell_url)
+                .bind(&spawn.data.app_url)
                 .bind(session.session_id)
                 .execute(&mut *tx)
                 .await
@@ -1205,8 +1214,10 @@ struct SpawnResponse {
 
 #[derive(Deserialize)]
 struct SpawnResponseData {
-    pod_name: String,
-    webshell_url: String,
+    container_id: String,
+    runtime_kind: String,
+    webshell_url: Option<String>,
+    app_url: Option<String>,
     #[allow(dead_code)]
     status: String,
 }

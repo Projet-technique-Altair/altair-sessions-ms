@@ -9,6 +9,7 @@ use crate::state::AppState;
 
 use crate::routes::{
     health::health,
+    metrics::basic_metrics,
     sessions::{
         complete_session, get_session_by_id, get_session_progress, get_sessions_by_lab,
         get_sessions_by_user, request_hint, start_session, stop_session, validate_step,
@@ -24,6 +25,7 @@ pub fn init_routes() -> Router<AppState> {
     Router::new()
         // Health
         .route("/health", get(health))
+        .route("/metrics", get(basic_metrics))
         // Start lab session
         .route("/labs/:id/start", post(start_session))
         // Session lifecycle

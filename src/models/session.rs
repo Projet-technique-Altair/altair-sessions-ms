@@ -21,7 +21,9 @@ pub struct SessionRow {
 
     pub container_id: Option<String>,
     pub status: String, // DB value (lowercase string)
+    pub runtime_kind: Option<String>,
     pub webshell_url: Option<String>,
+    pub app_url: Option<String>,
 
     pub created_at: chrono::NaiveDateTime,
     pub expires_at: Option<chrono::NaiveDateTime>,
@@ -35,7 +37,9 @@ pub struct Session {
 
     pub container_id: Option<String>,
     pub status: SessionStatus,
+    pub runtime_kind: Option<String>,
     pub webshell_url: Option<String>,
+    pub app_url: Option<String>,
 
     pub created_at: chrono::NaiveDateTime,
     pub expires_at: Option<chrono::NaiveDateTime>,
@@ -64,7 +68,9 @@ impl TryFrom<SessionRow> for Session {
             lab_id: row.lab_id,
             container_id: row.container_id,
             status,
+            runtime_kind: row.runtime_kind,
             webshell_url: row.webshell_url,
+            app_url: row.app_url,
             created_at: row.created_at,
             expires_at: row.expires_at,
         })
