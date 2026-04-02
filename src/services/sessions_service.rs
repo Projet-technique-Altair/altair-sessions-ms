@@ -1,12 +1,15 @@
 use reqwest::Client;
-use serde::Deserialize;
-use sqlx::PgPool;
+use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 use url::Url;
 
 use crate::{
     error::AppError,
     models::lab_progress::{LabProgress, LabProgressRow},
+    models::learner_lab_status::{
+        LearnerDashboardLab, LearnerLabStatus, LearnerLabStatusKind, LearnerLabStatusRow,
+    },
     models::session::{Session, SessionRow, SessionStatus},
 };
 
@@ -28,7 +31,6 @@ pub struct SessionsService {
     labs_ms_base: Url,
 }
 
-use serde::Serialize;
 use serde_json::Value;
 
 #[derive(Serialize)]
@@ -48,6 +50,24 @@ pub struct ValidateStepResult {
     pub points_earned: i32,
     pub current_step: i32,
     pub next_step: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LabApiResponse<T> {
+    data: T,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LabOverview {
+    lab_id: Uuid,
+    name: String,
+    description: Option<String>,
+    difficulty: Option<String>,
+    category: Option<String>,
+    visibility: Option<String>,
+    lab_delivery: Option<String>,
+    estimated_duration: Option<String>,
+    template_path: Option<String>,
 }
 
 impl SessionsService {
@@ -74,17 +94,346 @@ impl SessionsService {
         }
     }
 
+    /// Creates or refreshes a TO DO relation for a learner on a public lab.
+    pub async fn follow_lab(
+        &self,
+        user_id: Uuid,
+        lab_id: Uuid,
+    ) -> Result<LearnerLabStatus, AppError> {
+        let lab = self.fetch_lab_overview(lab_id).await?;
+        if lab.visibility.as_deref() != Some("PUBLIC") {
+            return Err(AppError::Forbidden(
+                "Only public labs can be followed".into(),
+            ));
+        }
+
+        let now = chrono::Utc::now().naive_utc();
+
+        // Re-following an existing TO DO refreshes its timestamps. Higher states keep their
+        // original lifecycle so we do not accidentally downgrade IN_PROGRESS or FINISHED.
+        let row = sqlx::query_as::<_, LearnerLabStatusRow>(
+            r#"
+            INSERT INTO learner_lab_status (
+                user_id,
+                lab_id,
+                status,
+                followed_at,
+                last_activity_at
+            )
+            VALUES ($1, $2, 'todo', $3, $3)
+            ON CONFLICT (user_id, lab_id)
+            DO UPDATE
+            SET
+                followed_at = CASE
+                    WHEN learner_lab_status.status = 'todo' THEN EXCLUDED.followed_at
+                    ELSE learner_lab_status.followed_at
+                END,
+                last_activity_at = CASE
+                    WHEN learner_lab_status.status = 'todo' THEN EXCLUDED.last_activity_at
+                    ELSE learner_lab_status.last_activity_at
+                END
+            RETURNING *
+            "#,
+        )
+        .bind(user_id)
+        .bind(lab_id)
+        .bind(now)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        LearnerLabStatus::try_from(row)
+    }
+
+    /// Removes the learner-lab relation only while it still represents a simple saved item.
+    pub async fn unfollow_lab(&self, user_id: Uuid, lab_id: Uuid) -> Result<(), AppError> {
+        let existing = sqlx::query_as::<_, LearnerLabStatusRow>(
+            r#"
+            SELECT *
+            FROM learner_lab_status
+            WHERE user_id = $1 AND lab_id = $2
+            "#,
+        )
+        .bind(user_id)
+        .bind(lab_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let Some(row) = existing else {
+            return Ok(());
+        };
+
+        let current = LearnerLabStatus::try_from(row)?;
+
+        if current.status != LearnerLabStatusKind::Todo {
+            return Err(AppError::Conflict(
+                "Only TO DO labs can be removed from follow".into(),
+            ));
+        }
+
+        sqlx::query(
+            r#"
+            DELETE FROM learner_lab_status
+            WHERE user_id = $1 AND lab_id = $2
+            "#,
+        )
+        .bind(user_id)
+        .bind(lab_id)
+        .execute(&self.db)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Builds the learner dashboard view by combining learner status rows with live lab metadata.
+    pub async fn get_dashboard_labs(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<LearnerDashboardLab>, AppError> {
+        let rows = sqlx::query_as::<_, LearnerLabStatusRow>(
+            r#"
+            SELECT *
+            FROM learner_lab_status
+            WHERE user_id = $1
+            ORDER BY
+                CASE status
+                    WHEN 'in_progress' THEN 0
+                    WHEN 'todo' THEN 1
+                    WHEN 'finished' THEN 2
+                    ELSE 3
+                END,
+                last_activity_at DESC
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let mut result = Vec::with_capacity(rows.len());
+
+        for row in rows {
+            let status = LearnerLabStatus::try_from(row)?.clone();
+            let lab = self.fetch_lab_overview(status.lab_id).await?;
+            let progress = self
+                .compute_dashboard_progress(status.status, status.last_session_id, status.lab_id)
+                .await?;
+
+            result.push(LearnerDashboardLab {
+                lab_id: lab.lab_id,
+                name: lab.name,
+                description: lab.description,
+                difficulty: lab.difficulty,
+                category: lab.category,
+                visibility: lab.visibility,
+                lab_delivery: lab.lab_delivery,
+                estimated_duration: lab.estimated_duration,
+                template_path: lab.template_path,
+                status: status.status,
+                started_at: status.started_at,
+                finished_at: status.finished_at,
+                last_activity_at: status.last_activity_at,
+                progress,
+            });
+        }
+
+        Ok(result)
+    }
+
+    /// Marks a learner lab as active when a runtime starts or resumes, but preserves FINISHED.
+    async fn upsert_lab_status_for_start(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: Uuid,
+        lab_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<(), AppError> {
+        let now = chrono::Utc::now().naive_utc();
+
+        sqlx::query(
+            r#"
+            INSERT INTO learner_lab_status (
+                user_id,
+                lab_id,
+                status,
+                followed_at,
+                started_at,
+                last_activity_at,
+                last_session_id
+            )
+            VALUES ($1, $2, 'in_progress', $3, $3, $3, $4)
+            ON CONFLICT (user_id, lab_id)
+            DO UPDATE
+            SET
+                status = CASE
+                    WHEN learner_lab_status.status = 'finished' THEN learner_lab_status.status
+                    ELSE 'in_progress'
+                END,
+                followed_at = learner_lab_status.followed_at,
+                started_at = COALESCE(learner_lab_status.started_at, EXCLUDED.started_at),
+                last_activity_at = EXCLUDED.last_activity_at,
+                last_session_id = EXCLUDED.last_session_id
+            "#,
+        )
+        .bind(user_id)
+        .bind(lab_id)
+        .bind(now)
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Persists the product-level FINISHED state independently from the runtime session state.
+    async fn mark_lab_finished(
+        &self,
+        user_id: Uuid,
+        lab_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<(), AppError> {
+        let now = chrono::Utc::now().naive_utc();
+
+        sqlx::query(
+            r#"
+            INSERT INTO learner_lab_status (
+                user_id,
+                lab_id,
+                status,
+                followed_at,
+                started_at,
+                finished_at,
+                last_activity_at,
+                last_session_id
+            )
+            VALUES ($1, $2, 'finished', $3, $3, $3, $3, $4)
+            ON CONFLICT (user_id, lab_id)
+            DO UPDATE
+            SET
+                status = 'finished',
+                started_at = COALESCE(learner_lab_status.started_at, EXCLUDED.started_at),
+                finished_at = EXCLUDED.finished_at,
+                last_activity_at = EXCLUDED.last_activity_at,
+                last_session_id = EXCLUDED.last_session_id
+            "#,
+        )
+        .bind(user_id)
+        .bind(lab_id)
+        .bind(now)
+        .bind(session_id)
+        .execute(&self.db)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Reads the catalog entry from labs-ms instead of duplicating lab metadata in sessions DB.
+    async fn fetch_lab_overview(&self, lab_id: Uuid) -> Result<LabOverview, AppError> {
+        let url = self
+            .labs_ms_base
+            .join(&format!("labs/{}", lab_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
+        let body = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
+            .json::<LabApiResponse<LabOverview>>()
+            .await
+            .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;
+
+        Ok(body.data)
+    }
+
+    /// Uses labs-ms as the source of truth for step count when rendering learner progress.
+    async fn fetch_lab_steps_count(&self, lab_id: Uuid) -> Result<i32, AppError> {
+        let url = self
+            .labs_ms_base
+            .join(&format!("labs/{}/steps", lab_id))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
+        let body = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;
+
+        let steps = body["data"]
+            .as_array()
+            .ok_or_else(|| AppError::Internal("Labs steps missing".into()))?;
+
+        Ok(steps.len() as i32)
+    }
+
+    /// Converts the learner-level status into a dashboard percentage.
+    async fn compute_dashboard_progress(
+        &self,
+        status: LearnerLabStatusKind,
+        last_session_id: Option<Uuid>,
+        lab_id: Uuid,
+    ) -> Result<i32, AppError> {
+        match status {
+            LearnerLabStatusKind::Todo => Ok(0),
+            LearnerLabStatusKind::Finished => Ok(100),
+            LearnerLabStatusKind::InProgress => {
+                // Without a tracked session we cannot derive a partial percentage yet.
+                let Some(session_id) = last_session_id else {
+                    return Ok(0);
+                };
+
+                let progress = sqlx::query_as::<_, LabProgressRow>(
+                    r#"
+                    SELECT *
+                    FROM lab_progress
+                    WHERE session_id = $1
+                    "#,
+                )
+                .bind(session_id)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+
+                let Some(progress) = progress else {
+                    return Ok(0);
+                };
+
+                let total_steps = self.fetch_lab_steps_count(lab_id).await?;
+                if total_steps <= 0 {
+                    return Ok(0);
+                }
+
+                let completed = progress.completed_steps.len() as i32;
+                Ok(((completed * 100) / total_steps).clamp(0, 99))
+            }
+        }
+    }
+
 
 
     /// POST /labs/:id/start
-    pub async fn start_session(&self, user_id: Uuid, lab_id: Uuid) -> Result<Session, AppError> {
+    pub async fn start_session(
+        &self,
+        user_id: Uuid,
+        lab_id: Uuid,
+        track_learner_status: bool,
+    ) -> Result<Session, AppError> {
         let mut tx = self
             .db
             .begin()
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        // 1️⃣ Unicité : aucune session active
+        // Keep one active runtime per learner/lab pair and treat a second start as a resume.
         let existing = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT COUNT(*)
@@ -124,16 +473,22 @@ impl SessionsService {
 
             let session = Session::try_from(row)?;
 
+            if track_learner_status {
+                // A resumed session still counts as fresh learner activity for the dashboard.
+                self.upsert_lab_status_for_start(&mut tx, user_id, lab_id, session.session_id)
+                    .await?;
+            }
+
             tx.commit()
                 .await
                 .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            // ✅ "start" devient un "start or resume"
+            // "Start" intentionally behaves as "start or resume" in the current session-centric model.
             return Ok(session);
         }
 
 
-        // 2️⃣ INSERT initial en CREATED
+        // Create the runtime session record before calling external services.
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
             INSERT INTO lab_sessions (
@@ -153,7 +508,7 @@ impl SessionsService {
 
         let session = Session::try_from(row)?;
 
-        // 2️⃣ bis — Initialiser la progression CTF
+        // Progress is still stored per session in the current implementation.
         sqlx::query(
             r#"
             INSERT INTO lab_progress (
@@ -181,7 +536,7 @@ impl SessionsService {
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        // 2️⃣ ter — Initialiser max_score et score depuis Labs MS
+        // The maximum reachable score comes from labs-ms step metadata.
         let url = self
             .labs_ms_base
             .join(&format!("internal/labs/{}/steps", lab_id))
@@ -206,7 +561,7 @@ impl SessionsService {
             .filter_map(|s| s["points"].as_i64())
             .sum::<i64>() as i32;
 
-        // Mettre à jour lab_progress avec score initial
+        // Persist the computed max score on the freshly created session progress row.
         sqlx::query(
             r#"
             UPDATE lab_progress
@@ -222,7 +577,7 @@ impl SessionsService {
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        // 3️⃣ Fetch lab info from Labs MS to get lab_type and template_path
+        // Resolve the runtime build metadata just before spawning the lab container.
         let url = self
             .labs_ms_base
             .join(&format!("labs/{}", lab_id))
@@ -256,7 +611,7 @@ impl SessionsService {
             .ok_or_else(|| AppError::Internal("Lab lab_delivery missing".into()))?
             .to_string();
 
-        // 4️⃣ Spawn container via lab-api-service
+        // The runtime is provisioned only after the DB rows exist.
         /*let spawn_result = self
             .client
             .post(format!("{}/spawn", self.lab_api_url))
@@ -292,7 +647,7 @@ impl SessionsService {
                     AppError::Internal("Invalid response from lab-api-service".into())
                 })?;
 
-                // 5️⃣ Transition CREATED → RUNNING
+                // The DB remains the source of truth for runtime session state transitions.
                 Self::validate_transition(session.status, SessionStatus::Running)?;
 
                 sqlx::query(
@@ -315,6 +670,12 @@ impl SessionsService {
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| AppError::Internal(e.to_string()))?;
+
+                if track_learner_status {
+                    // Learner tracking is written only after the runtime is actually usable.
+                    self.upsert_lab_status_for_start(&mut tx, user_id, lab_id, session.session_id)
+                        .await?;
+                }
             }
 
             Ok(resp) => {
@@ -322,7 +683,7 @@ impl SessionsService {
                 let error_body = resp.text().await.unwrap_or_default();
                 eprintln!("Lab API spawn failed: {}", error_body);
 
-                // 6️⃣ Transition CREATED → ERROR
+                // Persist the failure so the caller never sees a phantom running session.
                 Self::validate_transition(session.status, SessionStatus::Error)?;
 
                 sqlx::query(
@@ -347,7 +708,7 @@ impl SessionsService {
             Err(e) => {
                 eprintln!("Lab API unreachable: {}", e);
 
-                // 6️⃣ Transition CREATED → ERROR
+                // Persist the failure so the caller never sees a phantom running session.
                 Self::validate_transition(session.status, SessionStatus::Error)?;
 
                 sqlx::query(
@@ -374,7 +735,7 @@ impl SessionsService {
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        // 7️⃣ Reload session
+        // Reload after commit to return the final session shape, including runtime URLs.
         self.get_session_by_id(session.session_id).await
     }
 
@@ -1148,8 +1509,8 @@ impl SessionsService {
                 .await;
         }
 
-        // 6️⃣ Marquer session comme STOPPED (DB-first: pas de 'completed')
-        // (si déjà stopped/expired/error => idempotent)
+        // Runtime completion and learner completion are two different concepts:
+        // the session is stopped, while the learner-lab relation becomes FINISHED.
         if session.status == SessionStatus::Running {
             sqlx::query(
                 r#"
@@ -1163,6 +1524,10 @@ impl SessionsService {
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
         }
+
+        // Persist the product-level completion state after the completion checks passed.
+        self.mark_lab_finished(session.user_id, session.lab_id, session.session_id)
+            .await?;
 
         // 7️⃣ Stats
         // total_attempts = somme des valeurs de attempts_per_step

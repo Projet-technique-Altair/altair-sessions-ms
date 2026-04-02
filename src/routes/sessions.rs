@@ -11,6 +11,7 @@ use crate::{
     models::{
         api::ApiResponse,
         lab_progress::LabProgress,
+        learner_lab_status::{LearnerDashboardLab, LearnerLabStatus},
         session::{RequestHintRequest, Session, ValidateStepRequest},
     },
     state::AppState,
@@ -29,6 +30,18 @@ use crate::{
 }*/
 
 use crate::services::sessions_service::SessionWithSteps;
+
+// This feature is learner-scoped. Creator-only or admin-only accounts must not access it unless
+// they also carry the learner role in the token.
+fn ensure_learner_role(roles: &[String]) -> Result<(), AppError> {
+    if roles.iter().any(|r| r == "learner") {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "Learner role is required for this feature".into(),
+        ))
+    }
+}
 
 pub async fn get_session_by_id(
     State(state): State<AppState>,
@@ -136,15 +149,62 @@ pub async fn start_session(
     Path(lab_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Session>>, AppError> {
-
     let caller = extract_caller(&headers)?;
+    // Starting a lab remains available to the existing caller path, but learner tracking is only
+    // written when the token actually includes the learner role.
+    let has_learner_role = caller.roles.iter().any(|r| r == "learner");
 
     let session = state
         .sessions_service
-        .start_session(caller.user_id, lab_id)
+        .start_session(caller.user_id, lab_id, has_learner_role)
         .await?;
 
     Ok(Json(ApiResponse::success(session)))
+}
+
+pub async fn follow_lab(
+    State(state): State<AppState>,
+    Path(lab_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<LearnerLabStatus>>, AppError> {
+    let caller = extract_caller(&headers)?;
+    ensure_learner_role(&caller.roles)?;
+
+    // The backend derives the acting learner from the token; the client never chooses a user_id.
+    let status = state.sessions_service.follow_lab(caller.user_id, lab_id).await?;
+    Ok(Json(ApiResponse::success(status)))
+}
+
+pub async fn unfollow_lab(
+    State(state): State<AppState>,
+    Path(lab_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let caller = extract_caller(&headers)?;
+    ensure_learner_role(&caller.roles)?;
+
+    state
+        .sessions_service
+        .unfollow_lab(caller.user_id, lab_id)
+        .await?;
+
+    Ok(Json(ApiResponse::success(())))
+}
+
+pub async fn get_learner_dashboard_labs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<Vec<LearnerDashboardLab>>>, AppError> {
+    let caller = extract_caller(&headers)?;
+    ensure_learner_role(&caller.roles)?;
+
+    // The dashboard is always scoped to the authenticated learner, never to an arbitrary user.
+    let labs = state
+        .sessions_service
+        .get_dashboard_labs(caller.user_id)
+        .await?;
+
+    Ok(Json(ApiResponse::success(labs)))
 }
 
 // ======================================================
