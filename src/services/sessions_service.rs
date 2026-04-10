@@ -484,7 +484,7 @@ impl SessionsService {
         }*/
 
         if existing > 0 {
-            let row = sqlx::query_as::<_, SessionRow>(
+            let rows = sqlx::query_as::<_, SessionRow>(
                 r#"
                 SELECT *
                 FROM lab_sessions
@@ -492,29 +492,33 @@ impl SessionsService {
                 AND lab_id = $2
                 AND status IN ('created', 'running')
                 ORDER BY created_at DESC
-                LIMIT 1
                 "#,
             )
             .bind(user_id)
             .bind(lab_id)
-            .fetch_one(&mut *tx)
+            .fetch_all(&mut *tx)
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            let session = Session::try_from(row)?;
+            for row in rows {
+                let row = self.reconcile_runtime_row_in_tx(&mut tx, row).await?;
+                let session = Session::try_from(row)?;
 
-            if track_learner_status {
-                // A resumed session still counts as fresh learner activity for the dashboard.
-                self.upsert_lab_status_for_start(&mut tx, user_id, lab_id, session.session_id)
-                    .await?;
+                if !Self::is_terminal(session.status) {
+                    if track_learner_status {
+                        // A resumed session still counts as fresh learner activity for the dashboard.
+                        self.upsert_lab_status_for_start(&mut tx, user_id, lab_id, session.session_id)
+                            .await?;
+                    }
+
+                    tx.commit()
+                        .await
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+                    // "Start" intentionally behaves as "start or resume" in the current session-centric model.
+                    return Ok(session);
+                }
             }
-
-            tx.commit()
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-
-            // "Start" intentionally behaves as "start or resume" in the current session-centric model.
-            return Ok(session);
         }
 
         // Create the runtime session record before calling external services.
@@ -859,6 +863,8 @@ impl SessionsService {
         .await
         .map_err(|_| AppError::NotFound("Session not found".into()))?;
 
+        let row = self.reconcile_runtime_row(row).await?;
+
         Ok(Session::try_from(row)?)
     }
 
@@ -894,19 +900,9 @@ impl SessionsService {
     }
 
     pub async fn get_web_runtime(&self, session_id: Uuid) -> Result<WebRuntimeSession, AppError> {
-        let row = sqlx::query_as::<_, SessionRow>(
-            r#"
-            SELECT *
-            FROM lab_sessions
-            WHERE session_id = $1
-            "#,
-        )
-        .bind(session_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|_| AppError::NotFound("Session not found".into()))?;
+        let session = self.get_session_by_id(session_id).await?;
 
-        let runtime_kind = row
+        let runtime_kind = session
             .runtime_kind
             .clone()
             .ok_or_else(|| AppError::Conflict("Runtime kind not ready yet".into()))?;
@@ -917,21 +913,21 @@ impl SessionsService {
             ));
         }
 
-        let container_id = row
+        let container_id = session
             .container_id
             .clone()
             .ok_or_else(|| AppError::Conflict("Web runtime container not ready yet".into()))?;
 
-        if row.status != "running" {
+        if session.status != SessionStatus::Running {
             return Err(AppError::Conflict("Web runtime not ready yet".into()));
         }
 
         Ok(WebRuntimeSession {
-            session_id: row.session_id,
-            user_id: row.user_id,
+            session_id: session.session_id,
+            user_id: session.user_id,
             runtime_kind,
             container_id,
-            status: row.status,
+            status: "running".to_string(),
         })
     }
 
@@ -1626,6 +1622,109 @@ impl SessionsService {
     pub async fn fetch_lab_creator_id(&self, lab_id: Uuid) -> Result<Uuid, AppError> {
         crate::services::labs_client::fetch_lab_creator_id(self.labs_ms_base.as_str(), lab_id).await
     }
+
+    // Running sessions can become stale if the runtime pod disappears behind the DB state.
+    // This check keeps sessions-ms from resuming or exposing a dead runtime as still active.
+    async fn reconcile_runtime_row(&self, row: SessionRow) -> Result<SessionRow, AppError> {
+        if row.status != "running" {
+            return Ok(row);
+        }
+
+        let Some(container_id) = row.container_id.as_deref() else {
+            return Ok(row);
+        };
+
+        let Some(runtime_status) = self.fetch_runtime_status(container_id).await? else {
+            return Ok(row);
+        };
+
+        if Self::runtime_status_is_active(&runtime_status) {
+            return Ok(row);
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE lab_sessions
+            SET status = 'error'
+            WHERE session_id = $1
+              AND status = 'running'
+            "#,
+        )
+        .bind(row.session_id)
+        .execute(&self.db)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let mut stale = row;
+        stale.status = "error".to_string();
+        Ok(stale)
+    }
+
+    async fn reconcile_runtime_row_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        row: SessionRow,
+    ) -> Result<SessionRow, AppError> {
+        if row.status != "running" {
+            return Ok(row);
+        }
+
+        let Some(container_id) = row.container_id.as_deref() else {
+            return Ok(row);
+        };
+
+        let Some(runtime_status) = self.fetch_runtime_status(container_id).await? else {
+            return Ok(row);
+        };
+
+        if Self::runtime_status_is_active(&runtime_status) {
+            return Ok(row);
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE lab_sessions
+            SET status = 'error'
+            WHERE session_id = $1
+              AND status = 'running'
+            "#,
+        )
+        .bind(row.session_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let mut stale = row;
+        stale.status = "error".to_string();
+        Ok(stale)
+    }
+
+    async fn fetch_runtime_status(&self, container_id: &str) -> Result<Option<String>, AppError> {
+        let url = self
+            .lab_api_base
+            .join(&format!("spawn/status/{container_id}"))
+            .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
+
+        let response = match self.client.get(url).send().await {
+            Ok(response) => response,
+            Err(_) => return Ok(None),
+        };
+
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let payload = match response.json::<RuntimeStatusResponse>().await {
+            Ok(payload) => payload,
+            Err(_) => return Ok(None),
+        };
+
+        Ok(Some(payload.status))
+    }
+
+    fn runtime_status_is_active(status: &str) -> bool {
+        status.eq_ignore_ascii_case("running")
+    }
 }
 
 #[derive(Deserialize)]
@@ -1645,9 +1744,14 @@ struct SpawnResponseData {
     status: String,
 }
 
+#[derive(Deserialize)]
+struct RuntimeStatusResponse {
+    status: String,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::extract_runtime_app_port;
+    use super::{extract_runtime_app_port, SessionsService};
     use serde_json::json;
 
     #[test]
@@ -1695,5 +1799,15 @@ mod tests {
             extract_runtime_app_port(&lab_data, "web").unwrap(),
             Some(3000)
         );
+    }
+
+    #[test]
+    fn running_runtime_status_is_considered_active() {
+        assert!(SessionsService::runtime_status_is_active("Running"));
+    }
+
+    #[test]
+    fn unknown_runtime_status_is_not_considered_active() {
+        assert!(!SessionsService::runtime_status_is_active("Unknown"));
     }
 }
