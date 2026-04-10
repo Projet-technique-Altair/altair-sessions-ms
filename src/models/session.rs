@@ -45,16 +45,6 @@ pub struct Session {
     pub expires_at: Option<chrono::NaiveDateTime>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct RuntimeLookup {
-    pub session_id: Uuid,
-    pub user_id: Uuid,
-    pub container_id: String,
-    pub status: SessionStatus,
-    pub runtime_kind: String,
-    pub app_url: Option<String>,
-}
-
 impl TryFrom<SessionRow> for Session {
     type Error = AppError;
 

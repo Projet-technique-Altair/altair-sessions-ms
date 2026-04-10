@@ -29,10 +29,7 @@ pub fn init_routes() -> Router<AppState> {
         .route("/metrics", get(basic_metrics))
         // Start lab session
         .route("/labs/:id/start", post(start_session))
-        .route(
-            "/learner/labs/:id/follow",
-            post(follow_lab).delete(unfollow_lab),
-        )
+        .route("/learner/labs/:id/follow", post(follow_lab).delete(unfollow_lab))
         .route("/learner/dashboard/labs", get(get_learner_dashboard_labs))
         // Session lifecycle
         .route("/sessions/:id", get(get_session_by_id).delete(stop_session))
@@ -44,13 +41,6 @@ pub fn init_routes() -> Router<AppState> {
         .route("/sessions/user/:id", get(get_sessions_by_user))
         .route("/sessions/lab/:id", get(get_sessions_by_lab))
         // For CRON
-        .route(
-            "/internal/cron/expire",
-            post(internal::expire_sessions_cron),
-        )
-        .route(
-            "/internal/runtime/by-container/:container_id",
-            get(internal::get_runtime_by_container_id),
-        )
+        .route("/internal/cron/expire", post(internal::expire_sessions_cron))
         .layer(middleware::from_fn(fake_auth))
 }
