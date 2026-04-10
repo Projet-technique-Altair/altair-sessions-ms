@@ -1,9 +1,22 @@
 use crate::{error::AppError, models::api::ApiResponse, state::AppState};
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
+use uuid::Uuid;
 
 #[derive(serde::Serialize)]
 pub struct ExpireResult {
     pub expired_count: usize,
+}
+
+#[derive(serde::Serialize)]
+pub struct WebRuntimeResult {
+    pub session_id: Uuid,
+    pub user_id: Uuid,
+    pub runtime_kind: String,
+    pub container_id: String,
+    pub status: String,
 }
 
 pub async fn expire_sessions_cron(
@@ -13,5 +26,22 @@ pub async fn expire_sessions_cron(
 
     Ok(Json(ApiResponse::success(ExpireResult {
         expired_count: expired,
+    })))
+}
+
+pub async fn get_web_runtime(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+) -> Result<Json<ApiResponse<WebRuntimeResult>>, AppError> {
+    // web-runtime gives lab-api-service the active runtime mapping it needs to
+    // bootstrap the browser session before redirecting the learner to LAB-WEB.
+    let runtime = state.sessions_service.get_web_runtime(session_id).await?;
+
+    Ok(Json(ApiResponse::success(WebRuntimeResult {
+        session_id: runtime.session_id,
+        user_id: runtime.user_id,
+        runtime_kind: runtime.runtime_kind,
+        container_id: runtime.container_id,
+        status: runtime.status,
     })))
 }
