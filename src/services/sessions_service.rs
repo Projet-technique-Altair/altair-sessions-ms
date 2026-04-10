@@ -70,6 +70,30 @@ struct LabOverview {
     template_path: Option<String>,
 }
 
+fn extract_runtime_app_port(
+    lab_data: &serde_json::Value,
+    lab_delivery: &str,
+) -> Result<Option<i64>, AppError> {
+    let app_port = match lab_data.get("runtime").and_then(|runtime| runtime.get("app_port")) {
+        Some(serde_json::Value::Null) | None => None,
+        // The spawn payload needs an integer port value that downstream services can
+        // forward as-is to Kubernetes Service targetPort.
+        Some(value) => Some(value.as_i64().ok_or_else(|| {
+            AppError::Internal("Lab runtime.app_port must be an integer".into())
+        })?),
+    };
+
+    // Web runtimes need their HTTP entrypoint before sessions-ms can ask lab-api
+    // to provision the matching Kubernetes Service.
+    if lab_delivery == "web" && app_port.is_none() {
+        return Err(AppError::Internal(
+            "Lab runtime.app_port missing for web delivery".into(),
+        ));
+    }
+
+    Ok(app_port)
+}
+
 impl SessionsService {
     pub fn new(db: PgPool) -> Self {
         let raw_api = std::env::var("LAB_API_URL")
@@ -610,6 +634,7 @@ impl SessionsService {
             .as_str()
             .ok_or_else(|| AppError::Internal("Lab lab_delivery missing".into()))?
             .to_string();
+        let app_port = extract_runtime_app_port(lab_data, &lab_delivery)?;
 
         // The runtime is provisioned only after the DB rows exist.
         /*let spawn_result = self
@@ -635,7 +660,8 @@ impl SessionsService {
                 "session_id": session.session_id,
                 "lab_type": lab_type,
                 "template_path": template_path,
-                "lab_delivery": lab_delivery
+                "lab_delivery": lab_delivery,
+                "app_port": app_port
             }))
             .send()
             .await;
@@ -1565,9 +1591,7 @@ impl SessionsService {
             lab_id,
         )
         .await
-}
-
-
+    }
 }
 
 #[derive(Deserialize)]
@@ -1585,4 +1609,51 @@ struct SpawnResponseData {
     app_url: Option<String>,
     #[allow(dead_code)]
     status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_runtime_app_port;
+    use serde_json::json;
+
+    #[test]
+    fn web_delivery_requires_runtime_app_port() {
+        // Web sessions must fail early here if labs-ms data is still incomplete.
+        let lab_data = json!({
+            "runtime": {
+                "app_port": null
+            }
+        });
+
+        let error = extract_runtime_app_port(&lab_data, "web").unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Internal error: Lab runtime.app_port missing for web delivery"
+        );
+    }
+
+    #[test]
+    fn terminal_delivery_keeps_optional_runtime_app_port() {
+        // Terminal sessions do not depend on a public HTTP entrypoint.
+        let lab_data = json!({
+            "runtime": {
+                "app_port": null
+            }
+        });
+
+        assert_eq!(extract_runtime_app_port(&lab_data, "terminal").unwrap(), None);
+    }
+
+    #[test]
+    fn integer_runtime_app_port_is_forwarded() {
+        // sessions-ms only needs to preserve the explicit integer port from labs-ms.
+        let lab_data = json!({
+            "runtime": {
+                "app_port": 3000
+            }
+        });
+
+        assert_eq!(extract_runtime_app_port(&lab_data, "web").unwrap(), Some(3000));
+    }
 }
