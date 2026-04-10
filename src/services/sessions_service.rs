@@ -699,6 +699,8 @@ impl SessionsService {
                 .bind(&spawn.data.container_id)
                 .bind(&spawn.data.runtime_kind)
                 .bind(&spawn.data.webshell_url)
+                // app_url is still persisted for transitional backend compatibility,
+                // even though the learner-facing LAB-WEB flow no longer uses it.
                 .bind(&spawn.data.app_url)
                 .bind(session.session_id)
                 .execute(&mut *tx)
