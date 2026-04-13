@@ -429,28 +429,39 @@ impl SessionsService {
                     AppError::Internal("Invalid response from lab-api-service".into())
                 })?;
 
-                sqlx::query(
-                    r#"
-                    UPDATE lab_session_runtimes
-                    SET
-                        container_id = $1,
-                        status = 'running',
-                        webshell_url = $2,
-                        app_url = $3,
-                        last_seen_at = NOW()
-                    WHERE runtime_id = $4
-                    "#,
-                )
-                .bind(&spawn.data.container_id)
-                .bind(&spawn.data.webshell_url)
-                .bind(&spawn.data.app_url)
-                .bind(runtime_id)
-                .execute(&mut **tx)
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+                let persist_runtime = async {
+                    sqlx::query(
+                        r#"
+                        UPDATE lab_session_runtimes
+                        SET
+                            container_id = $1,
+                            status = 'running',
+                            webshell_url = $2,
+                            app_url = $3,
+                            last_seen_at = NOW()
+                        WHERE runtime_id = $4
+                        "#,
+                    )
+                    .bind(&spawn.data.container_id)
+                    .bind(&spawn.data.webshell_url)
+                    .bind(&spawn.data.app_url)
+                    .bind(runtime_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
 
-                self.mark_session_runtime_active(tx, session_id, runtime_id)
-                    .await?;
+                    self.mark_session_runtime_active(tx, session_id, runtime_id)
+                        .await
+                }
+                .await;
+
+                // Stop the freshly created runtime if sessions-ms cannot persist it.
+                if let Err(error) = persist_runtime {
+                    let _ = self
+                        .stop_runtime_container_best_effort(&spawn.data.container_id)
+                        .await;
+                    return Err(error);
+                }
             }
             Ok(resp) => {
                 let error_body = resp.text().await.unwrap_or_default();
@@ -642,7 +653,7 @@ impl SessionsService {
         Ok(result)
     }
 
-    /// Marks a learner lab as active when a runtime starts or resumes, but preserves FINISHED.
+    /// Marks a learner lab as active when a runtime starts or resumes.
     async fn upsert_lab_status_for_start(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -667,12 +678,13 @@ impl SessionsService {
             ON CONFLICT (user_id, lab_id)
             DO UPDATE
             SET
-                status = CASE
-                    WHEN learner_lab_status.status = 'finished' THEN learner_lab_status.status
-                    ELSE 'in_progress'
-                END,
+                status = 'in_progress',
                 followed_at = learner_lab_status.followed_at,
-                started_at = COALESCE(learner_lab_status.started_at, EXCLUDED.started_at),
+                started_at = CASE
+                    WHEN learner_lab_status.status = 'finished' THEN EXCLUDED.started_at
+                    ELSE COALESCE(learner_lab_status.started_at, EXCLUDED.started_at)
+                END,
+                finished_at = NULL,
                 last_activity_at = EXCLUDED.last_activity_at,
                 last_session_id = EXCLUDED.last_session_id
             "#,
@@ -1760,13 +1772,28 @@ impl SessionsService {
             Err(_) => return Ok(None),
         };
 
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Some("Unknown".to_string()));
+        }
+
         if !response.status().is_success() {
+            eprintln!(
+                "Runtime status lookup failed for {}: HTTP {}",
+                container_id,
+                response.status()
+            );
             return Ok(None);
         }
 
         let payload = match response.json::<RuntimeStatusResponse>().await {
             Ok(payload) => payload,
-            Err(_) => return Ok(None),
+            Err(error) => {
+                eprintln!(
+                    "Runtime status lookup returned invalid payload for {}: {}",
+                    container_id, error
+                );
+                return Ok(None);
+            }
         };
 
         Ok(Some(payload.status))
