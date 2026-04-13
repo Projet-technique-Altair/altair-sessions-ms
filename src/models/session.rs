@@ -23,6 +23,8 @@ pub struct SessionRow {
     pub container_id: Option<String>,
     pub runtime_kind: Option<String>,
     pub webshell_url: Option<String>,
+    // app_url remains stored temporarily for backend compatibility while the
+    // LAB-WEB bootstrap-tab flow fully replaces the older direct-open contract.
     pub app_url: Option<String>,
     pub expires_at: Option<NaiveDateTime>,
 
@@ -42,6 +44,8 @@ pub struct Session {
     pub container_id: Option<String>,
     pub runtime_kind: Option<String>,
     pub webshell_url: Option<String>,
+    // Kept for transitional compatibility with backend callers; the frontend no
+    // longer depends on app_url in the current LAB-WEB flow.
     pub app_url: Option<String>,
     pub expires_at: Option<NaiveDateTime>,
 
