@@ -336,14 +336,17 @@ impl SessionsService {
     }
 
     async fn total_runtime_seconds(&self, session_id: Uuid) -> Result<i64, AppError> {
-        let total = sqlx::query_scalar::<_, Option<f64>>(
+        let total = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT SUM(
-                EXTRACT(
-                    EPOCH FROM (
-                        COALESCE(stopped_at, NOW()) - created_at
+            SELECT COALESCE(
+                FLOOR(SUM(
+                    EXTRACT(
+                        EPOCH FROM (
+                            COALESCE(stopped_at, NOW()) - created_at
+                        )
                     )
-                )
+                ))::BIGINT,
+                0::BIGINT
             )
             FROM lab_session_runtimes
             WHERE session_id = $1
@@ -352,10 +355,9 @@ impl SessionsService {
         .bind(session_id)
         .fetch_one(&self.db)
         .await
-        .map_err(|e| AppError::Internal(e.to_string()))?
-        .unwrap_or(0.0);
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        Ok(total.max(0.0) as i64)
+        Ok(total.max(0))
     }
 
     async fn provision_runtime_for_session(
