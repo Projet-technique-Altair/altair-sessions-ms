@@ -829,7 +829,7 @@ impl SessionsService {
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        let existing_session_id = sqlx::query_scalar::<_, Option<Uuid>>(
+        let existing_session_id = sqlx::query_scalar::<_, Uuid>(
             r#"
             SELECT session_id
             FROM lab_sessions
@@ -842,7 +842,7 @@ impl SessionsService {
         )
         .bind(user_id)
         .bind(lab_id)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
