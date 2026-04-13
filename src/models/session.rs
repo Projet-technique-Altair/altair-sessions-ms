@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -7,10 +8,8 @@ use uuid::Uuid;
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SessionStatus {
     Created,
-    Running,
-    Stopped,
-    Expired,
-    Error,
+    InProgress,
+    Completed,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -18,17 +17,20 @@ pub struct SessionRow {
     pub session_id: Uuid,
     pub user_id: Uuid,
     pub lab_id: Uuid,
+    pub current_runtime_id: Option<Uuid>,
 
-    pub container_id: Option<String>,
     pub status: String, // DB value (lowercase string)
+    pub container_id: Option<String>,
     pub runtime_kind: Option<String>,
     pub webshell_url: Option<String>,
     // app_url remains stored temporarily for backend compatibility while the
     // LAB-WEB bootstrap-tab flow fully replaces the older direct-open contract.
     pub app_url: Option<String>,
+    pub expires_at: Option<NaiveDateTime>,
 
-    pub created_at: chrono::NaiveDateTime,
-    pub expires_at: Option<chrono::NaiveDateTime>,
+    pub created_at: NaiveDateTime,
+    pub completed_at: Option<NaiveDateTime>,
+    pub last_activity_at: NaiveDateTime,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -36,17 +38,20 @@ pub struct Session {
     pub session_id: Uuid,
     pub user_id: Uuid,
     pub lab_id: Uuid,
+    pub current_runtime_id: Option<Uuid>,
 
-    pub container_id: Option<String>,
     pub status: SessionStatus,
+    pub container_id: Option<String>,
     pub runtime_kind: Option<String>,
     pub webshell_url: Option<String>,
     // Kept for transitional compatibility with backend callers; the frontend no
     // longer depends on app_url in the current LAB-WEB flow.
     pub app_url: Option<String>,
+    pub expires_at: Option<NaiveDateTime>,
 
-    pub created_at: chrono::NaiveDateTime,
-    pub expires_at: Option<chrono::NaiveDateTime>,
+    pub created_at: NaiveDateTime,
+    pub completed_at: Option<NaiveDateTime>,
+    pub last_activity_at: NaiveDateTime,
 }
 
 impl TryFrom<SessionRow> for Session {
@@ -55,10 +60,8 @@ impl TryFrom<SessionRow> for Session {
     fn try_from(row: SessionRow) -> Result<Self, Self::Error> {
         let status = match row.status.as_str() {
             "created" => SessionStatus::Created,
-            "running" => SessionStatus::Running,
-            "stopped" => SessionStatus::Stopped,
-            "expired" => SessionStatus::Expired,
-            "error" => SessionStatus::Error,
+            "in_progress" => SessionStatus::InProgress,
+            "completed" => SessionStatus::Completed,
             other => {
                 return Err(AppError::Internal(format!(
                     "Invalid session status in DB: {other}"
@@ -70,13 +73,16 @@ impl TryFrom<SessionRow> for Session {
             session_id: row.session_id,
             user_id: row.user_id,
             lab_id: row.lab_id,
+            current_runtime_id: row.current_runtime_id,
             container_id: row.container_id,
             status,
             runtime_kind: row.runtime_kind,
             webshell_url: row.webshell_url,
             app_url: row.app_url,
-            created_at: row.created_at,
             expires_at: row.expires_at,
+            created_at: row.created_at,
+            completed_at: row.completed_at,
+            last_activity_at: row.last_activity_at,
         })
     }
 }

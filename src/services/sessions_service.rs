@@ -10,7 +10,7 @@ use crate::{
     models::learner_lab_status::{
         LearnerDashboardLab, LearnerLabStatus, LearnerLabStatusKind, LearnerLabStatusRow,
     },
-    models::session::{Session, SessionRow, SessionStatus},
+    models::session::{Session, SessionRow},
 };
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +59,28 @@ pub struct ValidateStepResult {
     pub current_step: i32,
     pub next_step: Option<serde_json::Value>,
 }
+
+const RUNTIME_TTL_SECS: i64 = 7_200;
+
+const SESSION_SELECT: &str = r#"
+    SELECT
+        s.session_id,
+        s.user_id,
+        s.lab_id,
+        s.current_runtime_id,
+        s.status,
+        r.container_id,
+        r.runtime_kind,
+        r.webshell_url,
+        r.app_url,
+        r.expires_at,
+        s.created_at,
+        s.completed_at,
+        s.last_activity_at
+    FROM lab_sessions s
+    LEFT JOIN lab_session_runtimes r
+      ON r.runtime_id = s.current_runtime_id
+"#;
 
 #[derive(Debug, Clone, Deserialize)]
 struct LabApiResponse<T> {
@@ -124,6 +146,363 @@ impl SessionsService {
             lab_api_base,
             labs_ms_base,
         }
+    }
+
+    fn runtime_namespace(runtime_kind: &str) -> &'static str {
+        match runtime_kind {
+            "web" => "labs-web",
+            _ => "default",
+        }
+    }
+
+    async fn load_session_row(&self, session_id: Uuid) -> Result<SessionRow, AppError> {
+        let sql = format!("{SESSION_SELECT} WHERE s.session_id = $1");
+
+        sqlx::query_as::<_, SessionRow>(&sql)
+            .bind(session_id)
+            .fetch_one(&self.db)
+            .await
+            .map_err(|_| AppError::NotFound("Session not found".into()))
+    }
+
+    async fn load_session_row_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+    ) -> Result<SessionRow, AppError> {
+        let sql = format!("{SESSION_SELECT} WHERE s.session_id = $1");
+
+        sqlx::query_as::<_, SessionRow>(&sql)
+            .bind(session_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|_| AppError::NotFound("Session not found".into()))
+    }
+
+    async fn next_restart_index(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+    ) -> Result<i32, AppError> {
+        let next = sqlx::query_scalar::<_, i32>(
+            r#"
+            SELECT COALESCE(MAX(restart_index), 0) + 1
+            FROM lab_session_runtimes
+            WHERE session_id = $1
+            "#,
+        )
+        .bind(session_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(next)
+    }
+
+    async fn create_runtime_row(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+        runtime_kind: &str,
+    ) -> Result<Uuid, AppError> {
+        let restart_index = self.next_restart_index(tx, session_id).await?;
+        let namespace = Self::runtime_namespace(runtime_kind);
+
+        let runtime_id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO lab_session_runtimes (
+                session_id,
+                runtime_kind,
+                status,
+                namespace,
+                expires_at,
+                restart_index
+            )
+            VALUES (
+                $1,
+                $2,
+                'starting',
+                $3,
+                NOW() + ($4 * INTERVAL '1 second'),
+                $5
+            )
+            RETURNING runtime_id
+            "#,
+        )
+        .bind(session_id)
+        .bind(runtime_kind)
+        .bind(namespace)
+        .bind(RUNTIME_TTL_SECS)
+        .bind(restart_index)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(runtime_id)
+    }
+
+    async fn mark_session_runtime_active(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+        runtime_id: Uuid,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+            UPDATE lab_sessions
+            SET
+                status = 'in_progress',
+                current_runtime_id = $1,
+                last_activity_at = NOW()
+            WHERE session_id = $2
+            "#,
+        )
+        .bind(runtime_id)
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn clear_current_runtime(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+            UPDATE lab_sessions
+            SET
+                current_runtime_id = NULL,
+                last_activity_at = NOW()
+            WHERE session_id = $1
+            "#,
+        )
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn mark_session_in_progress(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+            UPDATE lab_sessions
+            SET
+                status = 'in_progress',
+                last_activity_at = NOW()
+            WHERE session_id = $1
+            "#,
+        )
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn finalize_runtime_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        runtime_id: Uuid,
+        status: &str,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+            UPDATE lab_session_runtimes
+            SET
+                status = $1,
+                stopped_at = COALESCE(stopped_at, NOW()),
+                last_seen_at = NOW()
+            WHERE runtime_id = $2
+            "#,
+        )
+        .bind(status)
+        .bind(runtime_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn total_runtime_seconds(&self, session_id: Uuid) -> Result<i64, AppError> {
+        let total = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COALESCE(
+                FLOOR(SUM(
+                    EXTRACT(
+                        EPOCH FROM (
+                            COALESCE(stopped_at, NOW()) - created_at
+                        )
+                    )
+                ))::BIGINT,
+                0::BIGINT
+            )
+            FROM lab_session_runtimes
+            WHERE session_id = $1
+            "#,
+        )
+        .bind(session_id)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        Ok(total.max(0))
+    }
+
+    async fn provision_runtime_for_session(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+        lab_id: Uuid,
+    ) -> Result<(), AppError> {
+        let url = self
+            .labs_ms_base
+            .join(&format!("labs/{lab_id}"))
+            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
+        let lab_resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;
+
+        let lab_data = lab_resp
+            .get("data")
+            .ok_or_else(|| AppError::Internal("Lab data missing".into()))?;
+
+        let lab_type = lab_data["lab_type"]
+            .as_str()
+            .unwrap_or("ctf_terminal_guided")
+            .to_string();
+
+        let template_path = lab_data["template_path"]
+            .as_str()
+            .ok_or_else(|| AppError::Internal("Lab template_path missing".into()))?
+            .to_string();
+        let lab_delivery = lab_data["lab_delivery"]
+            .as_str()
+            .ok_or_else(|| AppError::Internal("Lab lab_delivery missing".into()))?
+            .to_string();
+        let app_port = extract_runtime_app_port(lab_data, &lab_delivery)?;
+
+        let runtime_id = self
+            .create_runtime_row(tx, session_id, &lab_delivery)
+            .await?;
+
+        let url = self
+            .lab_api_base
+            .join("spawn")
+            .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
+
+        let spawn_result = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({
+                "session_id": session_id,
+                "runtime_id": runtime_id,
+                "lab_type": lab_type,
+                "template_path": template_path,
+                "lab_delivery": lab_delivery,
+                "app_port": app_port
+            }))
+            .send()
+            .await;
+
+        match spawn_result {
+            Ok(resp) if resp.status().is_success() => {
+                let spawn: SpawnResponse = resp.json().await.map_err(|_| {
+                    AppError::Internal("Invalid response from lab-api-service".into())
+                })?;
+
+                let persist_runtime = async {
+                    sqlx::query(
+                        r#"
+                        UPDATE lab_session_runtimes
+                        SET
+                            container_id = $1,
+                            status = 'running',
+                            webshell_url = $2,
+                            app_url = $3,
+                            last_seen_at = NOW()
+                        WHERE runtime_id = $4
+                        "#,
+                    )
+                    .bind(&spawn.data.container_id)
+                    .bind(&spawn.data.webshell_url)
+                    .bind(&spawn.data.app_url)
+                    .bind(runtime_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+
+                    self.mark_session_runtime_active(tx, session_id, runtime_id)
+                        .await
+                }
+                .await;
+
+                // Stop the freshly created runtime if sessions-ms cannot persist it.
+                if let Err(error) = persist_runtime {
+                    let _ = self
+                        .stop_runtime_container_best_effort(&spawn.data.container_id)
+                        .await;
+                    return Err(error);
+                }
+            }
+            Ok(resp) => {
+                let error_body = resp.text().await.unwrap_or_default();
+                eprintln!("Lab API spawn failed: {}", error_body);
+
+                self.finalize_runtime_in_tx(tx, runtime_id, "error").await?;
+                self.clear_current_runtime(tx, session_id).await?;
+                self.mark_session_in_progress(tx, session_id).await?;
+
+                return Err(AppError::Internal("Failed to spawn container".into()));
+            }
+            Err(error) => {
+                eprintln!("Lab API unreachable: {}", error);
+
+                self.finalize_runtime_in_tx(tx, runtime_id, "error").await?;
+                self.clear_current_runtime(tx, session_id).await?;
+                self.mark_session_in_progress(tx, session_id).await?;
+
+                return Err(AppError::Internal("Lab API service unreachable".into()));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn stop_runtime_container_best_effort(&self, container_id: &str) -> Result<(), AppError> {
+        let url = self
+            .lab_api_base
+            .join("spawn/stop")
+            .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
+
+        let _ = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({
+                "container_id": container_id
+            }))
+            .send()
+            .await;
+
+        Ok(())
     }
 
     /// Creates or refreshes a TO DO relation for a learner on a public lab.
@@ -274,7 +653,7 @@ impl SessionsService {
         Ok(result)
     }
 
-    /// Marks a learner lab as active when a runtime starts or resumes, but preserves FINISHED.
+    /// Marks a learner lab as active when a runtime starts or resumes.
     async fn upsert_lab_status_for_start(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -299,12 +678,13 @@ impl SessionsService {
             ON CONFLICT (user_id, lab_id)
             DO UPDATE
             SET
-                status = CASE
-                    WHEN learner_lab_status.status = 'finished' THEN learner_lab_status.status
-                    ELSE 'in_progress'
-                END,
+                status = 'in_progress',
                 followed_at = learner_lab_status.followed_at,
-                started_at = COALESCE(learner_lab_status.started_at, EXCLUDED.started_at),
+                started_at = CASE
+                    WHEN learner_lab_status.status = 'finished' THEN EXCLUDED.started_at
+                    ELSE COALESCE(learner_lab_status.started_at, EXCLUDED.started_at)
+                END,
+                finished_at = NULL,
                 last_activity_at = EXCLUDED.last_activity_at,
                 last_session_id = EXCLUDED.last_session_id
             "#,
@@ -463,411 +843,189 @@ impl SessionsService {
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        // Keep one active runtime per learner/lab pair and treat a second start as a resume.
-        let existing = sqlx::query_scalar::<_, i64>(
+        let existing_session_id = sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT COUNT(*)
+            SELECT session_id
             FROM lab_sessions
             WHERE user_id = $1
-            AND lab_id = $2
-            AND status IN ('created', 'running')
+              AND lab_id = $2
+              AND status IN ('created', 'in_progress')
+            ORDER BY created_at DESC
+            LIMIT 1
             "#,
         )
         .bind(user_id)
         .bind(lab_id)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        /*if existing > 0 {
-            return Err(AppError::Conflict("Session already active".into()));
-        }*/
+        let session_id = if let Some(session_id) = existing_session_id {
+            let row = self.load_session_row_in_tx(&mut tx, session_id).await?;
+            let row = self.reconcile_runtime_row_in_tx(&mut tx, row).await?;
 
-        if existing > 0 {
-            let rows = sqlx::query_as::<_, SessionRow>(
+            if row.current_runtime_id.is_none() {
+                self.provision_runtime_for_session(&mut tx, session_id, lab_id)
+                    .await?;
+            } else {
+                sqlx::query(
+                    r#"
+                    UPDATE lab_sessions
+                    SET last_activity_at = NOW()
+                    WHERE session_id = $1
+                    "#,
+                )
+                .bind(session_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
+
+            session_id
+        } else {
+            let session_id = sqlx::query_scalar::<_, Uuid>(
                 r#"
-                SELECT *
-                FROM lab_sessions
-                WHERE user_id = $1
-                AND lab_id = $2
-                AND status IN ('created', 'running')
-                ORDER BY created_at DESC
+                INSERT INTO lab_sessions (
+                    user_id,
+                    lab_id,
+                    status,
+                    last_activity_at
+                )
+                VALUES ($1, $2, 'created', NOW())
+                RETURNING session_id
                 "#,
             )
             .bind(user_id)
             .bind(lab_id)
-            .fetch_all(&mut *tx)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            for row in rows {
-                let row = self.reconcile_runtime_row_in_tx(&mut tx, row).await?;
-                let session = Session::try_from(row)?;
-
-                if !Self::is_terminal(session.status) {
-                    if track_learner_status {
-                        // A resumed session still counts as fresh learner activity for the dashboard.
-                        self.upsert_lab_status_for_start(&mut tx, user_id, lab_id, session.session_id)
-                            .await?;
-                    }
-
-                    tx.commit()
-                        .await
-                        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-                    // "Start" intentionally behaves as "start or resume" in the current session-centric model.
-                    return Ok(session);
-                }
-            }
-        }
-
-        // Create the runtime session record before calling external services.
-        let row = sqlx::query_as::<_, SessionRow>(
-            r#"
-            INSERT INTO lab_sessions (
-                user_id,
-                lab_id,
-                status
-            )
-            VALUES ($1, $2, 'created')
-            RETURNING *
-            "#,
-        )
-        .bind(user_id)
-        .bind(lab_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-        let session = Session::try_from(row)?;
-
-        // Progress is still stored per session in the current implementation.
-        sqlx::query(
-            r#"
-            INSERT INTO lab_progress (
-                session_id,
-                current_step,
-                completed_steps,
-                hints_used,
-                attempts_per_step,
-                score,
-                max_score
-            )
-            VALUES (
-                $1,
-                1,
-                '{}',
-                '[]',
-                '{}',
-                0,
-                0
-            )
-            "#,
-        )
-        .bind(session.session_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-        // The maximum reachable score comes from labs-ms step metadata.
-        let url = self
-            .labs_ms_base
-            .join(&format!("internal/labs/{}/steps", lab_id))
-            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
-
-        let steps_resp = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;
-
-        let steps = steps_resp["data"]
-            .as_array()
-            .ok_or_else(|| AppError::Internal("Labs steps missing".into()))?;
-
-        let max_score = steps
-            .iter()
-            .filter_map(|s| s["points"].as_i64())
-            .sum::<i64>() as i32;
-
-        // Persist the computed max score on the freshly created session progress row.
-        sqlx::query(
-            r#"
-            UPDATE lab_progress
-            SET
-                max_score = $1,
-                score = 0
-            WHERE session_id = $2
-            "#,
-        )
-        .bind(max_score)
-        .bind(session.session_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-        // Resolve the runtime build metadata just before spawning the lab container.
-        let url = self
-            .labs_ms_base
-            .join(&format!("labs/{}", lab_id))
-            .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
-
-        let lab_resp = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;
-
-        let lab_data = lab_resp
-            .get("data")
-            .ok_or_else(|| AppError::Internal("Lab data missing".into()))?;
-
-        let lab_type = lab_data["lab_type"]
-            .as_str()
-            .unwrap_or("ctf_terminal_guided")
-            .to_string();
-
-        let template_path = lab_data["template_path"]
-            .as_str()
-            .ok_or_else(|| AppError::Internal("Lab template_path missing".into()))?
-            .to_string();
-        let lab_delivery = lab_data["lab_delivery"]
-            .as_str()
-            .ok_or_else(|| AppError::Internal("Lab lab_delivery missing".into()))?
-            .to_string();
-        let app_port = extract_runtime_app_port(lab_data, &lab_delivery)?;
-
-        // The runtime is provisioned only after the DB rows exist.
-        /*let spawn_result = self
-        .client
-        .post(format!("{}/spawn", self.lab_api_url))
-        .json(&serde_json::json!({
-            "session_id": session.session_id,
-            "lab_type": lab_type,
-            "template_path": template_path
-        }))
-        .send()
-        .await;*/
-
-        let url = self
-            .lab_api_base
-            .join("spawn")
-            .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
-
-        let spawn_result = self
-            .client
-            .post(url)
-            .json(&serde_json::json!({
-                "session_id": session.session_id,
-                "lab_type": lab_type,
-                "template_path": template_path,
-                "lab_delivery": lab_delivery,
-                "app_port": app_port
-            }))
-            .send()
-            .await;
-
-        match spawn_result {
-            Ok(resp) if resp.status().is_success() => {
-                let spawn: SpawnResponse = resp.json().await.map_err(|_| {
-                    AppError::Internal("Invalid response from lab-api-service".into())
-                })?;
-
-                // The DB remains the source of truth for runtime session state transitions.
-                Self::validate_transition(session.status, SessionStatus::Running)?;
-
-                sqlx::query(
-                    r#"
-                    UPDATE lab_sessions
-                    SET
-                        status = 'running',
-                        container_id = $1,
-                        runtime_kind = $2,
-                        webshell_url = $3,
-                        app_url = $4
-                    WHERE session_id = $5
-                    "#,
+            sqlx::query(
+                r#"
+                INSERT INTO lab_progress (
+                    session_id,
+                    current_step,
+                    completed_steps,
+                    hints_used,
+                    attempts_per_step,
+                    score,
+                    max_score
                 )
-                .bind(&spawn.data.container_id)
-                .bind(&spawn.data.runtime_kind)
-                .bind(&spawn.data.webshell_url)
-                // app_url is still persisted for transitional backend compatibility,
-                // even though the learner-facing LAB-WEB flow no longer uses it.
-                .bind(&spawn.data.app_url)
-                .bind(session.session_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-
-                if track_learner_status {
-                    // Learner tracking is written only after the runtime is actually usable.
-                    self.upsert_lab_status_for_start(&mut tx, user_id, lab_id, session.session_id)
-                        .await?;
-                }
-            }
-
-            Ok(resp) => {
-                // Non-success status code
-                let error_body = resp.text().await.unwrap_or_default();
-                eprintln!("Lab API spawn failed: {}", error_body);
-
-                // Persist the failure so the caller never sees a phantom running session.
-                Self::validate_transition(session.status, SessionStatus::Error)?;
-
-                sqlx::query(
-                    r#"
-                    UPDATE lab_sessions
-                    SET status = 'error'
-                    WHERE session_id = $1
-                    "#,
+                VALUES (
+                    $1,
+                    1,
+                    '{}',
+                    '[]',
+                    '{}',
+                    0,
+                    0
                 )
-                .bind(session.session_id)
-                .execute(&mut *tx)
+                "#,
+            )
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            let url = self
+                .labs_ms_base
+                .join(&format!("internal/labs/{lab_id}/steps"))
+                .map_err(|e| AppError::Internal(format!("Invalid Labs URL: {e}")))?;
+
+            let steps_resp = self
+                .client
+                .get(url)
+                .send()
                 .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-
-                tx.commit()
-                    .await
-                    .map_err(|e| AppError::Internal(e.to_string()))?;
-
-                return Err(AppError::Internal("Failed to spawn container".into()));
-            }
-
-            Err(e) => {
-                eprintln!("Lab API unreachable: {}", e);
-
-                // Persist the failure so the caller never sees a phantom running session.
-                Self::validate_transition(session.status, SessionStatus::Error)?;
-
-                sqlx::query(
-                    r#"
-                    UPDATE lab_sessions
-                    SET status = 'error'
-                    WHERE session_id = $1
-                    "#,
-                )
-                .bind(session.session_id)
-                .execute(&mut *tx)
+                .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
+                .json::<serde_json::Value>()
                 .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+                .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;
 
-                tx.commit()
-                    .await
-                    .map_err(|e| AppError::Internal(e.to_string()))?;
+            let steps = steps_resp["data"]
+                .as_array()
+                .ok_or_else(|| AppError::Internal("Labs steps missing".into()))?;
 
-                return Err(AppError::Internal("Lab API service unreachable".into()));
-            }
+            let max_score = steps
+                .iter()
+                .filter_map(|s| s["points"].as_i64())
+                .sum::<i64>() as i32;
+
+            sqlx::query(
+                r#"
+                UPDATE lab_progress
+                SET
+                    max_score = $1,
+                    score = 0
+                WHERE session_id = $2
+                "#,
+            )
+            .bind(max_score)
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            self.provision_runtime_for_session(&mut tx, session_id, lab_id)
+                .await?;
+
+            session_id
+        };
+
+        if track_learner_status {
+            self.upsert_lab_status_for_start(&mut tx, user_id, lab_id, session_id)
+                .await?;
         }
 
         tx.commit()
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        // Reload after commit to return the final session shape, including runtime URLs.
-        self.get_session_by_id(session.session_id).await
+        self.get_session_by_id(session_id).await
     }
 
     /// DELETE /sessions/:id
     pub async fn stop_session(&self, session_id: Uuid) -> Result<(), AppError> {
-        // 1️⃣ Load session
-        let row = sqlx::query_as::<_, SessionRow>(
-            r#"
-            SELECT *
-            FROM lab_sessions
-            WHERE session_id = $1
-            "#,
-        )
-        .bind(session_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|_| AppError::NotFound("Session not found".into()))?;
+        let row = self.load_session_row(session_id).await?;
+        let row = self.reconcile_runtime_row(row).await?;
 
-        let session = Session::try_from(row)?;
-
-        // 2️⃣ Terminal states → idempotent OK
-        if Self::is_terminal(session.status) {
+        let Some(runtime_id) = row.current_runtime_id else {
             return Ok(());
+        };
+
+        if let Some(container_id) = row.container_id.as_deref() {
+            self.stop_runtime_container_best_effort(container_id)
+                .await?;
         }
 
-        // 3️⃣ CREATED → STOPPED interdit
-        if session.status == SessionStatus::Created {
-            return Err(AppError::Conflict(
-                "Cannot stop a session that has not started".into(),
-            ));
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        self.finalize_runtime_in_tx(&mut tx, runtime_id, "stopped")
+            .await?;
+        self.clear_current_runtime(&mut tx, session_id).await?;
+
+        if row.status != "completed" {
+            self.mark_session_in_progress(&mut tx, session_id).await?;
         }
 
-        // 4️⃣ RUNNING → STOPPED (唯一 transition autorisée ici)
-        Self::validate_transition(session.status, SessionStatus::Stopped)?;
-
-        // 5️⃣ Stop container (best effort)
-        /*if let Some(container_id) = &session.container_id {
-            self.client
-                .post(format!("{}/spawn/stop", self.lab_api_url))
-                .json(&serde_json::json!({
-                    "container_id": container_id
-                }))
-                .send()
-                .await
-                .map_err(|e| AppError::Internal(format!("Stop call failed: {e}")))?;
-        }*/
-
-        if let Some(container_id) = &session.container_id {
-            let url = self
-                .lab_api_base
-                .join("spawn/stop")
-                .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
-
-            let _ = self
-                .client
-                .post(url)
-                .json(&serde_json::json!({
-                    "container_id": container_id
-                }))
-                .send()
-                .await;
-        }
-
-        // 6️⃣ Update DB
-        sqlx::query(
-            r#"
-            UPDATE lab_sessions
-            SET status = 'stopped'
-            WHERE session_id = $1
-            "#,
-        )
-        .bind(session_id)
-        .execute(&self.db)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(())
     }
 
     /// GET /sessions/:id
     pub async fn get_session_by_id(&self, session_id: Uuid) -> Result<Session, AppError> {
-        let row = sqlx::query_as::<_, SessionRow>(
-            r#"
-            SELECT *
-            FROM lab_sessions
-            WHERE session_id = $1
-            "#,
-        )
-        .bind(session_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|_| AppError::NotFound("Session not found".into()))?;
-
+        let row = self.load_session_row(session_id).await?;
         let row = self.reconcile_runtime_row(row).await?;
 
-        Ok(Session::try_from(row)?)
+        Session::try_from(row)
     }
 
     pub async fn get_session_with_steps(
@@ -904,6 +1062,10 @@ impl SessionsService {
     pub async fn get_web_runtime(&self, session_id: Uuid) -> Result<WebRuntimeSession, AppError> {
         let session = self.get_session_by_id(session_id).await?;
 
+        if session.current_runtime_id.is_none() {
+            return Err(AppError::Conflict("Web runtime not ready yet".into()));
+        }
+
         let runtime_kind = session
             .runtime_kind
             .clone()
@@ -920,10 +1082,6 @@ impl SessionsService {
             .clone()
             .ok_or_else(|| AppError::Conflict("Web runtime container not ready yet".into()))?;
 
-        if session.status != SessionStatus::Running {
-            return Err(AppError::Conflict("Web runtime not ready yet".into()));
-        }
-
         Ok(WebRuntimeSession {
             session_id: session.session_id,
             user_id: session.user_id,
@@ -935,156 +1093,85 @@ impl SessionsService {
 
     // GET /sessions/lab/:id
     pub async fn get_sessions_by_lab(&self, lab_id: Uuid) -> Result<Vec<Session>, AppError> {
-        let rows = sqlx::query_as::<_, SessionRow>(
-            r#"
-            SELECT *
-            FROM lab_sessions
-            WHERE lab_id = $1
-            ORDER BY created_at DESC
-            "#,
-        )
-        .bind(lab_id)
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        let sql = format!("{SESSION_SELECT} WHERE s.lab_id = $1 ORDER BY s.created_at DESC");
 
-        rows.into_iter().map(Session::try_from).collect()
+        let rows = sqlx::query_as::<_, SessionRow>(&sql)
+            .bind(lab_id)
+            .fetch_all(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let mut sessions = Vec::with_capacity(rows.len());
+        for row in rows {
+            let row = self.reconcile_runtime_row(row).await?;
+            sessions.push(Session::try_from(row)?);
+        }
+
+        Ok(sessions)
     }
 
     //GET /sessions/user/:id
     pub async fn get_sessions_by_user(&self, user_id: Uuid) -> Result<Vec<Session>, AppError> {
-        let rows = sqlx::query_as::<_, SessionRow>(
-            r#"
-            SELECT *
-            FROM lab_sessions
-            WHERE user_id = $1
-            ORDER BY created_at DESC
-            "#,
-        )
-        .bind(user_id)
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        let sql = format!("{SESSION_SELECT} WHERE s.user_id = $1 ORDER BY s.created_at DESC");
 
-        rows.into_iter().map(Session::try_from).collect()
-    }
+        let rows = sqlx::query_as::<_, SessionRow>(&sql)
+            .bind(user_id)
+            .fetch_all(&self.db)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    fn validate_transition(from: SessionStatus, to: SessionStatus) -> Result<(), AppError> {
-        use SessionStatus::*;
-
-        let allowed = matches!(
-            (from, to),
-            (Created, Running)
-                | (Created, Error)
-                | (Running, Stopped)
-                | (Running, Expired)
-                | (Running, Error)
-        );
-
-        if allowed {
-            Ok(())
-        } else {
-            Err(AppError::Conflict(format!(
-                "Invalid session state transition: {:?} -> {:?}",
-                from, to
-            )))
+        let mut sessions = Vec::with_capacity(rows.len());
+        for row in rows {
+            let row = self.reconcile_runtime_row(row).await?;
+            sessions.push(Session::try_from(row)?);
         }
-    }
 
-    fn is_terminal(status: SessionStatus) -> bool {
-        matches!(
-            status,
-            SessionStatus::Stopped | SessionStatus::Expired | SessionStatus::Error
-        )
+        Ok(sessions)
     }
 
     //EXPIRE SESSION
     pub async fn expire_session(&self, session_id: Uuid) -> Result<(), AppError> {
-        // 1️⃣ Load session
-        let row = sqlx::query_as::<_, SessionRow>(
-            r#"
-            SELECT *
-            FROM lab_sessions
-            WHERE session_id = $1
-            "#,
-        )
-        .bind(session_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|_| AppError::NotFound("Session not found".into()))?;
+        let row = self.load_session_row(session_id).await?;
+        let row = self.reconcile_runtime_row(row).await?;
 
-        let session = Session::try_from(row)?;
-
-        // 2️⃣ Terminal states → idempotent OK
-        if Self::is_terminal(session.status) {
+        let Some(runtime_id) = row.current_runtime_id else {
             return Ok(());
+        };
+
+        if let Some(container_id) = row.container_id.as_deref() {
+            self.stop_runtime_container_best_effort(container_id)
+                .await?;
         }
 
-        // 3️⃣ Only RUNNING → EXPIRED allowed
-        if session.status != SessionStatus::Running {
-            return Ok(()); // idempotence (CREATED, etc.)
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        self.finalize_runtime_in_tx(&mut tx, runtime_id, "expired")
+            .await?;
+        self.clear_current_runtime(&mut tx, session_id).await?;
+
+        if row.status != "completed" {
+            self.mark_session_in_progress(&mut tx, session_id).await?;
         }
 
-        // 4️⃣ Validate transition
-        Self::validate_transition(session.status, SessionStatus::Expired)?;
-
-        // 5️⃣ Stop container (best effort)
-        /*if let Some(container_id) = &session.container_id {
-            let _ = self
-                .client
-                .post(format!("{}/spawn/stop", self.lab_api_url))
-                .json(&serde_json::json!({
-                    "container_id": container_id
-                }))
-                .send()
-                .await;
-            // ⚠️ best effort: expiration must proceed even if runtime is down
-        }*/
-
-        if let Some(container_id) = &session.container_id {
-            let url = self
-                .lab_api_base
-                .join("spawn/stop")
-                .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
-
-            let _ = self
-                .client
-                .post(url)
-                .json(&serde_json::json!({
-                    "container_id": container_id
-                }))
-                .send()
-                .await;
-        }
-
-        // 6️⃣ Update DB
-        sqlx::query(
-            r#"
-            UPDATE lab_sessions
-            SET status = 'expired',
-                expires_at = NOW()
-            WHERE session_id = $1
-            "#,
-        )
-        .bind(session_id)
-        .execute(&self.db)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok(())
     }
 
     // CRON
     pub async fn expire_all_expired_sessions(&self) -> Result<usize, AppError> {
-        // 1️⃣ Sélectionner les sessions RUNNING dépassant le timeout
-        let rows = sqlx::query_as::<_, SessionRow>(
+        let session_ids = sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT *
-            FROM lab_sessions
+            SELECT DISTINCT session_id
+            FROM lab_session_runtimes
             WHERE status = 'running'
-            AND (
-                created_at + INTERVAL '2 hours'
-            ) < NOW()
+              AND expires_at < NOW()
             "#,
         )
         .fetch_all(&self.db)
@@ -1093,17 +1180,8 @@ impl SessionsService {
 
         let mut expired_count = 0;
 
-        // 2️⃣ Appliquer expiration une par une (idempotent)
-        for row in rows {
-            let session = Session::try_from(row)?;
-
-            // sécurité supplémentaire
-            if session.status != SessionStatus::Running {
-                continue;
-            }
-
-            // réutilise ta logique existante
-            if self.expire_session(session.session_id).await.is_ok() {
+        for session_id in session_ids {
+            if self.expire_session(session_id).await.is_ok() {
                 expired_count += 1;
             }
         }
@@ -1115,7 +1193,6 @@ impl SessionsService {
     // GET /sessions/:id/progress
     // ======================================================
     pub async fn get_progress(&self, session_id: Uuid) -> Result<LabProgress, AppError> {
-        // 1️⃣ Charger la progression
         let progress_row = sqlx::query_as::<_, LabProgressRow>(
             r#"
             SELECT *
@@ -1128,21 +1205,9 @@ impl SessionsService {
         .await
         .map_err(|_| AppError::NotFound("Progress not found".into()))?;
 
-        // 2️⃣ Charger created_at de la session
-        let session_created_at = sqlx::query_scalar::<_, chrono::NaiveDateTime>(
-            r#"
-            SELECT created_at
-            FROM lab_sessions
-            WHERE session_id = $1
-            "#,
-        )
-        .bind(session_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|_| AppError::NotFound("Session not found".into()))?;
+        let time_elapsed = self.total_runtime_seconds(session_id).await?;
 
-        // 3️⃣ Construire la réponse API
-        Ok(LabProgress::from_row(progress_row, session_created_at))
+        Ok(LabProgress::from_row(progress_row, time_elapsed))
     }
 
     // ======================================================
@@ -1474,22 +1539,10 @@ impl SessionsService {
     }
 
     pub async fn complete_session(&self, session_id: Uuid) -> Result<serde_json::Value, AppError> {
-        // 1️⃣ Charger la session
-        let session_row = sqlx::query_as::<_, SessionRow>(
-            r#"
-            SELECT *
-            FROM lab_sessions
-            WHERE session_id = $1
-            "#,
-        )
-        .bind(session_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|_| AppError::NotFound("Session not found".into()))?;
-
+        let session_row = self.load_session_row(session_id).await?;
+        let session_row = self.reconcile_runtime_row(session_row).await?;
         let session = Session::try_from(session_row)?;
 
-        // 2️⃣ Charger la progression
         let progress = sqlx::query_as::<_, LabProgressRow>(
             r#"
             SELECT *
@@ -1501,17 +1554,6 @@ impl SessionsService {
         .fetch_one(&self.db)
         .await
         .map_err(|_| AppError::NotFound("Progress not found".into()))?;
-
-        // 3️⃣ Récupérer le nombre total de steps depuis Labs MS
-        // Hypothèse: GET /labs/:lab_id/steps -> renvoie { "steps": [ ... ] }
-        /*let lab = self.client
-        .get(format!("{}/labs/{}/steps", self.lab_api_url, session.lab_id))
-        .send()
-        .await
-        .map_err(|_| AppError::Internal("Labs MS unreachable".into()))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|_| AppError::Internal("Invalid Labs response".into()))?;*/
 
         let url = self
             .labs_ms_base
@@ -1538,7 +1580,6 @@ impl SessionsService {
             return Err(AppError::Internal("Labs returned no steps".into()));
         }
 
-        // 4️⃣ Vérifier completion: toutes les steps 1..=total_steps doivent être dans completed_steps
         let completed: std::collections::HashSet<i32> =
             progress.completed_steps.iter().cloned().collect();
 
@@ -1548,54 +1589,45 @@ impl SessionsService {
             return Err(AppError::Conflict("Lab not completed yet".into()));
         }
 
-        // 5️⃣ Stop pod (best effort)
-        /*if let Some(container_id) = &session.container_id {
-            let _ = self
-                .client
-                .post(format!("{}/spawn/stop", self.lab_api_url))
-                .json(&serde_json::json!({ "container_id": container_id }))
-                .send()
-                .await;
-        }*/
-
-        if let Some(container_id) = &session.container_id {
-            let url = self
-                .lab_api_base
-                .join("spawn/stop")
-                .map_err(|e| AppError::Internal(format!("Invalid lab-api URL: {e}")))?;
-
-            let _ = self
-                .client
-                .post(url)
-                .json(&serde_json::json!({
-                    "container_id": container_id
-                }))
-                .send()
-                .await;
+        if let Some(container_id) = session.container_id.as_deref() {
+            self.stop_runtime_container_best_effort(container_id)
+                .await?;
         }
 
-        // Runtime completion and learner completion are two different concepts:
-        // the session is stopped, while the learner-lab relation becomes FINISHED.
-        if session.status == SessionStatus::Running {
-            sqlx::query(
-                r#"
-                UPDATE lab_sessions
-                SET status = 'stopped'
-                WHERE session_id = $1
-                "#,
-            )
-            .bind(session_id)
-            .execute(&self.db)
+        let mut tx = self
+            .db
+            .begin()
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        if let Some(runtime_id) = session.current_runtime_id {
+            self.finalize_runtime_in_tx(&mut tx, runtime_id, "stopped")
+                .await?;
+            self.clear_current_runtime(&mut tx, session_id).await?;
         }
 
-        // Persist the product-level completion state after the completion checks passed.
+        sqlx::query(
+            r#"
+            UPDATE lab_sessions
+            SET
+                status = 'completed',
+                completed_at = COALESCE(completed_at, NOW()),
+                last_activity_at = NOW()
+            WHERE session_id = $1
+            "#,
+        )
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
         self.mark_lab_finished(session.user_id, session.lab_id, session.session_id)
             .await?;
 
-        // 7️⃣ Stats
-        // total_attempts = somme des valeurs de attempts_per_step
         let total_attempts = progress
             .attempts_per_step
             .as_object()
@@ -1608,8 +1640,7 @@ impl SessionsService {
             .map(|a| a.len() as i64)
             .unwrap_or(0);
 
-        let now = chrono::Utc::now().naive_utc();
-        let completion_seconds = (now - session.created_at).num_seconds().max(0);
+        let completion_seconds = self.total_runtime_seconds(session_id).await?;
 
         Ok(serde_json::json!({
             "completed": true,
@@ -1625,15 +1656,32 @@ impl SessionsService {
         crate::services::labs_client::fetch_lab_creator_id(self.labs_ms_base.as_str(), lab_id).await
     }
 
-    // Running sessions can become stale if the runtime pod disappears behind the DB state.
-    // This check keeps sessions-ms from resuming or exposing a dead runtime as still active.
     async fn reconcile_runtime_row(&self, row: SessionRow) -> Result<SessionRow, AppError> {
-        if row.status != "running" {
+        let Some(runtime_id) = row.current_runtime_id else {
             return Ok(row);
-        }
+        };
 
         let Some(container_id) = row.container_id.as_deref() else {
-            return Ok(row);
+            let mut tx = self
+                .db
+                .begin()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            self.finalize_runtime_in_tx(&mut tx, runtime_id, "error")
+                .await?;
+            self.clear_current_runtime(&mut tx, row.session_id).await?;
+
+            if row.status != "completed" {
+                self.mark_session_in_progress(&mut tx, row.session_id)
+                    .await?;
+            }
+
+            tx.commit()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            return self.load_session_row(row.session_id).await;
         };
 
         let Some(runtime_status) = self.fetch_runtime_status(container_id).await? else {
@@ -1644,22 +1692,30 @@ impl SessionsService {
             return Ok(row);
         }
 
-        sqlx::query(
-            r#"
-            UPDATE lab_sessions
-            SET status = 'error'
-            WHERE session_id = $1
-              AND status = 'running'
-            "#,
-        )
-        .bind(row.session_id)
-        .execute(&self.db)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        let mut stale = row;
-        stale.status = "error".to_string();
-        Ok(stale)
+        self.finalize_runtime_in_tx(
+            &mut tx,
+            runtime_id,
+            Self::runtime_status_to_final_state(&runtime_status),
+        )
+        .await?;
+        self.clear_current_runtime(&mut tx, row.session_id).await?;
+
+        if row.status != "completed" {
+            self.mark_session_in_progress(&mut tx, row.session_id)
+                .await?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        self.load_session_row(row.session_id).await
     }
 
     async fn reconcile_runtime_row_in_tx(
@@ -1667,12 +1723,19 @@ impl SessionsService {
         tx: &mut Transaction<'_, Postgres>,
         row: SessionRow,
     ) -> Result<SessionRow, AppError> {
-        if row.status != "running" {
+        let Some(runtime_id) = row.current_runtime_id else {
             return Ok(row);
-        }
+        };
 
         let Some(container_id) = row.container_id.as_deref() else {
-            return Ok(row);
+            self.finalize_runtime_in_tx(tx, runtime_id, "error").await?;
+            self.clear_current_runtime(tx, row.session_id).await?;
+
+            if row.status != "completed" {
+                self.mark_session_in_progress(tx, row.session_id).await?;
+            }
+
+            return self.load_session_row_in_tx(tx, row.session_id).await;
         };
 
         let Some(runtime_status) = self.fetch_runtime_status(container_id).await? else {
@@ -1683,22 +1746,19 @@ impl SessionsService {
             return Ok(row);
         }
 
-        sqlx::query(
-            r#"
-            UPDATE lab_sessions
-            SET status = 'error'
-            WHERE session_id = $1
-              AND status = 'running'
-            "#,
+        self.finalize_runtime_in_tx(
+            tx,
+            runtime_id,
+            Self::runtime_status_to_final_state(&runtime_status),
         )
-        .bind(row.session_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .await?;
+        self.clear_current_runtime(tx, row.session_id).await?;
 
-        let mut stale = row;
-        stale.status = "error".to_string();
-        Ok(stale)
+        if row.status != "completed" {
+            self.mark_session_in_progress(tx, row.session_id).await?;
+        }
+
+        self.load_session_row_in_tx(tx, row.session_id).await
     }
 
     async fn fetch_runtime_status(&self, container_id: &str) -> Result<Option<String>, AppError> {
@@ -1712,13 +1772,28 @@ impl SessionsService {
             Err(_) => return Ok(None),
         };
 
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Some("Unknown".to_string()));
+        }
+
         if !response.status().is_success() {
+            eprintln!(
+                "Runtime status lookup failed for {}: HTTP {}",
+                container_id,
+                response.status()
+            );
             return Ok(None);
         }
 
         let payload = match response.json::<RuntimeStatusResponse>().await {
             Ok(payload) => payload,
-            Err(_) => return Ok(None),
+            Err(error) => {
+                eprintln!(
+                    "Runtime status lookup returned invalid payload for {}: {}",
+                    container_id, error
+                );
+                return Ok(None);
+            }
         };
 
         Ok(Some(payload.status))
@@ -1726,6 +1801,14 @@ impl SessionsService {
 
     fn runtime_status_is_active(status: &str) -> bool {
         status.eq_ignore_ascii_case("running")
+    }
+
+    fn runtime_status_to_final_state(status: &str) -> &'static str {
+        if status.eq_ignore_ascii_case("succeeded") {
+            "stopped"
+        } else {
+            "error"
+        }
     }
 }
 
@@ -1739,7 +1822,6 @@ struct SpawnResponse {
 #[derive(Deserialize)]
 struct SpawnResponseData {
     container_id: String,
-    runtime_kind: String,
     webshell_url: Option<String>,
     app_url: Option<String>,
     #[allow(dead_code)]
