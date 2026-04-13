@@ -40,8 +40,8 @@ pub struct LabProgress {
 }
 
 impl LabProgress {
-    /// Calcule attempts totales depuis attempts_per_step
-    pub fn from_row(row: LabProgressRow, session_created_at: NaiveDateTime) -> Self {
+    /// Builds the API payload from persisted aggregates and computed runtime time.
+    pub fn from_row(row: LabProgressRow, time_elapsed: i64) -> Self {
         let attempts = row
             .attempts_per_step
             .as_object()
@@ -58,9 +58,6 @@ impl LabProgress {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-
-        let now = chrono::Utc::now().naive_utc();
-        let time_elapsed = (now - session_created_at).num_seconds();
 
         Self {
             session_id: row.session_id,
