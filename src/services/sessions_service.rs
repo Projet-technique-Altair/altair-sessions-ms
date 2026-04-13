@@ -412,6 +412,7 @@ impl SessionsService {
             .post(url)
             .json(&serde_json::json!({
                 "session_id": session_id,
+                "runtime_id": runtime_id,
                 "lab_type": lab_type,
                 "template_path": template_path,
                 "lab_delivery": lab_delivery,
