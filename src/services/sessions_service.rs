@@ -10,7 +10,7 @@ use crate::{
     models::learner_lab_status::{
         LearnerDashboardLab, LearnerLabStatus, LearnerLabStatusKind, LearnerLabStatusRow,
     },
-    models::session::{Session, SessionRow, SessionStatus},
+    models::session::{Session, SessionRow},
 };
 
 #[derive(Debug, Deserialize)]
@@ -44,7 +44,6 @@ pub struct SessionWithSteps {
 pub struct WebRuntimeSession {
     pub session_id: Uuid,
     pub user_id: Uuid,
-    pub lab_id: Uuid,
     pub runtime_kind: String,
     pub container_id: String,
     pub status: String,
@@ -1063,9 +1062,9 @@ impl SessionsService {
     pub async fn get_web_runtime(&self, session_id: Uuid) -> Result<WebRuntimeSession, AppError> {
         let session = self.get_session_by_id(session_id).await?;
 
-        let runtime_id = session
-            .current_runtime_id
-            .ok_or_else(|| AppError::Conflict("Web runtime not ready yet".into()))?;
+        if session.current_runtime_id.is_none() {
+            return Err(AppError::Conflict("Web runtime not ready yet".into()));
+        }
 
         let runtime_kind = session
             .runtime_kind
@@ -1083,18 +1082,9 @@ impl SessionsService {
             .clone()
             .ok_or_else(|| AppError::Conflict("Web runtime container not ready yet".into()))?;
 
-        self.ensure_web_runtime_running(
-            session.session_id,
-            runtime_id,
-            &container_id,
-            session.status,
-        )
-        .await?;
-
         Ok(WebRuntimeSession {
             session_id: session.session_id,
             user_id: session.user_id,
-            lab_id: session.lab_id,
             runtime_kind,
             container_id,
             status: "running".to_string(),
@@ -1662,64 +1652,6 @@ impl SessionsService {
         }))
     }
 
-    async fn ensure_web_runtime_running(
-        &self,
-        session_id: Uuid,
-        runtime_id: Uuid,
-        container_id: &str,
-        session_status: SessionStatus,
-    ) -> Result<(), AppError> {
-        let Some(runtime_status) = self.fetch_runtime_status(container_id).await? else {
-            return Err(AppError::Conflict("Web runtime status unavailable".into()));
-        };
-
-        if runtime_status.eq_ignore_ascii_case("running") {
-            return Ok(());
-        }
-
-        if Self::runtime_status_is_active(&runtime_status) {
-            return Err(AppError::Conflict("Web runtime not ready yet".into()));
-        }
-
-        self.finalize_unhealthy_runtime(
-            session_id,
-            runtime_id,
-            Self::runtime_status_to_final_state(&runtime_status),
-            session_status,
-        )
-        .await?;
-
-        Err(AppError::Conflict("Web runtime not ready yet".into()))
-    }
-
-    async fn finalize_unhealthy_runtime(
-        &self,
-        session_id: Uuid,
-        runtime_id: Uuid,
-        final_status: &str,
-        session_status: SessionStatus,
-    ) -> Result<(), AppError> {
-        let mut tx = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-
-        self.finalize_runtime_in_tx(&mut tx, runtime_id, final_status)
-            .await?;
-        self.clear_current_runtime(&mut tx, session_id).await?;
-
-        if session_status != SessionStatus::Completed {
-            self.mark_session_in_progress(&mut tx, session_id).await?;
-        }
-
-        tx.commit()
-            .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-
-        Ok(())
-    }
-
     pub async fn fetch_lab_creator_id(&self, lab_id: Uuid) -> Result<Uuid, AppError> {
         crate::services::labs_client::fetch_lab_creator_id(self.labs_ms_base.as_str(), lab_id).await
     }
@@ -1868,12 +1800,7 @@ impl SessionsService {
     }
 
     fn runtime_status_is_active(status: &str) -> bool {
-        // Kubernetes may report transitional phases while a pod is still healthy and booting.
-        // Treat these as active to avoid prematurely finalizing the runtime as failed.
         status.eq_ignore_ascii_case("running")
-            || status.eq_ignore_ascii_case("pending")
-            || status.eq_ignore_ascii_case("starting")
-            || status.eq_ignore_ascii_case("created")
     }
 
     fn runtime_status_to_final_state(status: &str) -> &'static str {
@@ -1961,11 +1888,6 @@ mod tests {
     #[test]
     fn running_runtime_status_is_considered_active() {
         assert!(SessionsService::runtime_status_is_active("Running"));
-    }
-
-    #[test]
-    fn pending_runtime_status_is_considered_active() {
-        assert!(SessionsService::runtime_status_is_active("Pending"));
     }
 
     #[test]
