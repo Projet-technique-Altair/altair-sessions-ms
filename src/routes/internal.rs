@@ -14,6 +14,7 @@ pub struct ExpireResult {
 pub struct WebRuntimeResult {
     pub session_id: Uuid,
     pub user_id: Uuid,
+    pub lab_id: Uuid,
     pub runtime_kind: String,
     pub container_id: String,
     pub status: String,
@@ -40,6 +41,7 @@ pub async fn get_web_runtime(
     Ok(Json(ApiResponse::success(WebRuntimeResult {
         session_id: runtime.session_id,
         user_id: runtime.user_id,
+        lab_id: runtime.lab_id,
         runtime_kind: runtime.runtime_kind,
         container_id: runtime.container_id,
         status: runtime.status,
