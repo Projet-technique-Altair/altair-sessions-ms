@@ -1,10 +1,8 @@
-use axum::middleware;
 use axum::{
     routing::{get, post},
     Router,
 };
 
-use crate::middleware::fake_auth::fake_auth;
 use crate::state::AppState;
 
 use crate::routes::{
@@ -54,5 +52,4 @@ pub fn init_routes() -> Router<AppState> {
             "/internal/sessions/:id/web-runtime",
             get(internal::get_web_runtime),
         )
-        .layer(middleware::from_fn(fake_auth))
 }
