@@ -1,7 +1,6 @@
-use uuid::Uuid;
-use axum::http::HeaderMap;
 use crate::error::AppError;
-
+use axum::http::HeaderMap;
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct Caller {
@@ -22,7 +21,6 @@ pub fn extract_caller(headers: &HeaderMap) -> Result<Caller, AppError> {
         .map(|s| s.split(',').map(|r| r.to_string()).collect())
         .unwrap_or_default();
 
-   
     let roles = normalize_roles(&raw_roles)?;
 
     Ok(Caller { user_id, roles })

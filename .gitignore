@@ -16,3 +16,5 @@ Thumbs.db
 *.tmp
 
 .env
+.env.teste-avantPROD
+.env.teste-avantPROD.*
