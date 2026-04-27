@@ -53,7 +53,12 @@ fn ensure_owner_or_admin(caller: &Caller, session: &Session) -> Result<(), AppEr
 pub async fn get_session_by_id(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiResponse<SessionWithSteps>>, AppError> {
+    let caller = extract_caller(&headers)?;
+    let base_session = state.sessions_service.get_session_by_id(session_id).await?;
+    ensure_owner_or_admin(&caller, &base_session)?;
+
     let session = state
         .sessions_service
         .get_session_with_steps(session_id)
@@ -69,7 +74,7 @@ pub async fn get_sessions_by_user(
 ) -> Result<Json<ApiResponse<Vec<Session>>>, AppError> {
     let caller = extract_caller(&headers)?;
 
-    if caller.user_id != user_id {
+    if !is_admin(&caller) && caller.user_id != user_id {
         return Err(AppError::Forbidden(
             "You can only access your own sessions".into(),
         ));
@@ -77,6 +82,22 @@ pub async fn get_sessions_by_user(
 
     let sessions = state.sessions_service.get_sessions_by_user(user_id).await?;
     Ok(Json(ApiResponse::success(sessions)))
+}
+
+pub async fn get_admin_user_dashboard_labs(
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<Vec<LearnerDashboardLab>>>, AppError> {
+    let caller = extract_caller(&headers)?;
+    if !is_admin(&caller) {
+        return Err(AppError::Forbidden(
+            "Admin role is required to inspect user progress".into(),
+        ));
+    }
+
+    let labs = state.sessions_service.get_dashboard_labs(user_id).await?;
+    Ok(Json(ApiResponse::success(labs)))
 }
 
 pub async fn get_sessions_by_lab(

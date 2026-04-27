@@ -9,9 +9,9 @@ use crate::routes::{
     health::health,
     metrics::basic_metrics,
     sessions::{
-        complete_session, follow_lab, get_learner_dashboard_labs, get_session_by_id,
-        get_session_progress, get_sessions_by_lab, get_sessions_by_user, request_hint,
-        start_session, stop_session, unfollow_lab, validate_step,
+        complete_session, follow_lab, get_admin_user_dashboard_labs, get_learner_dashboard_labs,
+        get_session_by_id, get_session_progress, get_sessions_by_lab, get_sessions_by_user,
+        request_hint, start_session, stop_session, unfollow_lab, validate_step,
     },
 };
 
@@ -32,6 +32,10 @@ pub fn init_routes() -> Router<AppState> {
             post(follow_lab).delete(unfollow_lab),
         )
         .route("/learner/dashboard/labs", get(get_learner_dashboard_labs))
+        .route(
+            "/admin/users/:id/dashboard/labs",
+            get(get_admin_user_dashboard_labs),
+        )
         // Session lifecycle
         .route("/sessions/:id", get(get_session_by_id).delete(stop_session))
         .route("/sessions/:id/progress", get(get_session_progress))
