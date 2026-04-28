@@ -29,6 +29,8 @@ pub struct SessionsService {
     lab_api_base: Url,
     /// URL for labs-ms (lab metadata, steps, hints)
     labs_ms_base: Url,
+    /// URL for groups-ms (private access checks)
+    groups_ms_base: Url,
 }
 
 use serde_json::Value;
@@ -95,6 +97,7 @@ struct LabOverview {
     difficulty: Option<String>,
     category: Option<String>,
     visibility: Option<String>,
+    content_status: Option<String>,
     lab_delivery: Option<String>,
     estimated_duration: Option<String>,
     template_path: Option<String>,
@@ -140,11 +143,17 @@ impl SessionsService {
 
         let labs_ms_base = Url::parse(&raw_labs).expect("Invalid LABS_MS_URL");
 
+        let raw_groups =
+            std::env::var("GROUPS_MS_URL").unwrap_or_else(|_| "http://localhost:3006/".to_string());
+
+        let groups_ms_base = Url::parse(&raw_groups).expect("Invalid GROUPS_MS_URL");
+
         Self {
             db,
             client: Client::new(),
             lab_api_base,
             labs_ms_base,
+            groups_ms_base,
         }
     }
 
@@ -512,6 +521,12 @@ impl SessionsService {
         lab_id: Uuid,
     ) -> Result<LearnerLabStatus, AppError> {
         let lab = self.fetch_lab_overview(lab_id).await?;
+        if lab.content_status.as_deref() == Some("archived") {
+            return Err(AppError::Forbidden(
+                "Archived labs cannot be followed".into(),
+            ));
+        }
+
         if lab.visibility.as_deref() != Some("PUBLIC") {
             return Err(AppError::Forbidden(
                 "Only public labs can be followed".into(),
@@ -763,6 +778,56 @@ impl SessionsService {
         Ok(body.data)
     }
 
+    async fn user_has_group_access_to_lab(
+        &self,
+        user_id: Uuid,
+        lab_id: Uuid,
+    ) -> Result<bool, AppError> {
+        let url = self
+            .groups_ms_base
+            .join(&format!(
+                "internal/access/lab?user_id={user_id}&lab_id={lab_id}"
+            ))
+            .map_err(|e| AppError::Internal(format!("Invalid Groups URL: {e}")))?;
+
+        let body = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| AppError::Internal("Groups MS unreachable".into()))?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| AppError::Internal("Invalid Groups response".into()))?;
+
+        Ok(body
+            .get("data")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false))
+    }
+
+    async fn ensure_lab_can_start(&self, user_id: Uuid, lab_id: Uuid) -> Result<(), AppError> {
+        let lab = self.fetch_lab_overview(lab_id).await?;
+
+        if lab.content_status.as_deref() == Some("archived") {
+            return Err(AppError::Forbidden(
+                "This lab is archived and cannot be started".into(),
+            ));
+        }
+
+        if lab.visibility.as_deref() == Some("PUBLIC") {
+            return Ok(());
+        }
+
+        if self.user_has_group_access_to_lab(user_id, lab_id).await? {
+            return Ok(());
+        }
+
+        Err(AppError::Forbidden(
+            "You are not allowed to start this private lab".into(),
+        ))
+    }
+
     /// Uses labs-ms as the source of truth for step count when rendering learner progress.
     async fn fetch_lab_steps_count(&self, lab_id: Uuid) -> Result<i32, AppError> {
         let url = self
@@ -837,6 +902,8 @@ impl SessionsService {
         lab_id: Uuid,
         track_learner_status: bool,
     ) -> Result<Session, AppError> {
+        self.ensure_lab_can_start(user_id, lab_id).await?;
+
         let mut tx = self
             .db
             .begin()
