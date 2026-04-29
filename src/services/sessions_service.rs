@@ -1,6 +1,6 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use url::Url;
 use uuid::Uuid;
 
@@ -34,6 +34,18 @@ pub struct SessionsService {
 }
 
 use serde_json::Value;
+
+#[derive(Serialize)]
+pub struct AdminSessionsAnalytics {
+    pub total_sessions: i64,
+    pub launched_sessions: i64,
+    pub completed_sessions: i64,
+    pub active_sessions: i64,
+    pub active_runtimes: i64,
+    pub completion_rate: f64,
+    pub launches_last_7d: i64,
+    pub completions_last_7d: i64,
+}
 
 #[derive(Serialize)]
 pub struct SessionWithSteps {
@@ -155,6 +167,50 @@ impl SessionsService {
             labs_ms_base,
             groups_ms_base,
         }
+    }
+
+    pub async fn get_admin_analytics(&self) -> Result<AdminSessionsAnalytics, AppError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                COUNT(*)::BIGINT AS total_sessions,
+                COUNT(*) FILTER (WHERE status IN ('created', 'in_progress', 'completed'))::BIGINT AS launched_sessions,
+                COUNT(*) FILTER (WHERE status = 'completed')::BIGINT AS completed_sessions,
+                COUNT(*) FILTER (WHERE status IN ('created', 'in_progress'))::BIGINT AS active_sessions,
+                COUNT(*) FILTER (
+                    WHERE current_runtime_id IS NOT NULL
+                      AND status IN ('created', 'in_progress')
+                )::BIGINT AS active_runtimes,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')::BIGINT AS launches_last_7d,
+                COUNT(*) FILTER (
+                    WHERE completed_at >= NOW() - INTERVAL '7 days'
+                      AND status = 'completed'
+                )::BIGINT AS completions_last_7d
+            FROM lab_sessions
+            "#,
+        )
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let launched_sessions: i64 = row.try_get("launched_sessions").unwrap_or(0);
+        let completed_sessions: i64 = row.try_get("completed_sessions").unwrap_or(0);
+        let completion_rate = if launched_sessions > 0 {
+            completed_sessions as f64 / launched_sessions as f64
+        } else {
+            0.0
+        };
+
+        Ok(AdminSessionsAnalytics {
+            total_sessions: row.try_get("total_sessions").unwrap_or(0),
+            launched_sessions,
+            completed_sessions,
+            active_sessions: row.try_get("active_sessions").unwrap_or(0),
+            active_runtimes: row.try_get("active_runtimes").unwrap_or(0),
+            completion_rate,
+            launches_last_7d: row.try_get("launches_last_7d").unwrap_or(0),
+            completions_last_7d: row.try_get("completions_last_7d").unwrap_or(0),
+        })
     }
 
     fn runtime_namespace(runtime_kind: &str) -> &'static str {
