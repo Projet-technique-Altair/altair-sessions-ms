@@ -8,9 +8,10 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
   ci:
-    uses: Projet-technique-Altair/altair-ci/.github/workflows/rust-ms.yml@v1
+    uses: Projet-technique-Altair/altair-ci/.github/workflows/rust-ms.yml@main
     with:
       rust_toolchain: stable
