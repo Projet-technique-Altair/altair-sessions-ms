@@ -740,3 +740,10 @@ This microservice is **functional for MVP deployment** with core session lifecyc
 ## License
 
 Internal Altaïr Platform Service – Not licensed for external use.
+## May 2026 Security And Platform Updates
+
+- Runtime Docker image now installs only required packages with `--no-install-recommends` and runs as non-root UID `10001`.
+- CORS origin handling is now allowlist-based through `ALLOWED_ORIGINS`; local defaults are `http://localhost:5173,http://localhost:3000`.
+- The service now respects the `PORT` environment variable, with `3003` as local fallback.
+- Upstream URLs such as `LABS_MS_URL`, `LAB_API_URL`, and `GROUPS_MS_URL` should be supplied by environment configuration per deployment.
+- Latest Trivy scan status for this repo: no HIGH or CRITICAL findings.

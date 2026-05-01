@@ -103,7 +103,8 @@ pub async fn get_admin_user_dashboard_labs(
 pub async fn get_admin_sessions_analytics(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<crate::services::sessions_service::AdminSessionsAnalytics>>, AppError> {
+) -> Result<Json<ApiResponse<crate::services::sessions_service::AdminSessionsAnalytics>>, AppError>
+{
     let caller = extract_caller(&headers)?;
     if !is_admin(&caller) {
         return Err(AppError::Forbidden(
