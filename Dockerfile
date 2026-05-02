@@ -14,22 +14,17 @@ RUN cargo build --release
 # =======================
 # Runtime
 # =======================
-FROM debian:bookworm-slim
+FROM gcr.io/distroless/cc-debian12:nonroot
 
 WORKDIR /app
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
-  && groupadd --system --gid 10001 altair \
-  && useradd --system --uid 10001 --gid altair --home-dir /nonexistent --shell /usr/sbin/nologin altair \
-  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder --chown=altair:altair /app/target/release/altair-sessions-ms /app/altair-sessions-ms
+COPY --from=builder /app/target/release/altair-sessions-ms /app/altair-sessions-ms
 
 EXPOSE 3003
 
 ENV RUST_LOG=info
 ENV RUST_BACKTRACE=1
 
-USER 10001
+USER nonroot:nonroot
 
 CMD ["/app/altair-sessions-ms"]
