@@ -6,6 +6,11 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag de l'image a redeployer manuellement (sha ou vN)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -25,10 +30,7 @@ jobs:
 
       service_name: altair-sessions-ms
       image_name: altair-sessions-ms
-
-      workdir: .
-      dockerfile: Dockerfile
-      platform: linux/amd64
+      image_tag: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || '' }}
 
       # This repository should define DATABASE_URL, LABS_MS_URL and LAB_API_URL
       # in its own runtime variables configuration.
