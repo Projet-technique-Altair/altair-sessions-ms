@@ -1,6 +1,6 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use url::Url;
 use uuid::Uuid;
 
@@ -29,9 +29,23 @@ pub struct SessionsService {
     lab_api_base: Url,
     /// URL for labs-ms (lab metadata, steps, hints)
     labs_ms_base: Url,
+    /// URL for groups-ms (private access checks)
+    groups_ms_base: Url,
 }
 
 use serde_json::Value;
+
+#[derive(Serialize)]
+pub struct AdminSessionsAnalytics {
+    pub total_sessions: i64,
+    pub launched_sessions: i64,
+    pub completed_sessions: i64,
+    pub active_sessions: i64,
+    pub active_runtimes: i64,
+    pub completion_rate: f64,
+    pub launches_last_7d: i64,
+    pub completions_last_7d: i64,
+}
 
 #[derive(Serialize)]
 pub struct SessionWithSteps {
@@ -95,6 +109,7 @@ struct LabOverview {
     difficulty: Option<String>,
     category: Option<String>,
     visibility: Option<String>,
+    content_status: Option<String>,
     lab_delivery: Option<String>,
     estimated_duration: Option<String>,
     template_path: Option<String>,
@@ -140,12 +155,62 @@ impl SessionsService {
 
         let labs_ms_base = Url::parse(&raw_labs).expect("Invalid LABS_MS_URL");
 
+        let raw_groups =
+            std::env::var("GROUPS_MS_URL").unwrap_or_else(|_| "http://localhost:3006/".to_string());
+
+        let groups_ms_base = Url::parse(&raw_groups).expect("Invalid GROUPS_MS_URL");
+
         Self {
             db,
             client: Client::new(),
             lab_api_base,
             labs_ms_base,
+            groups_ms_base,
         }
+    }
+
+    pub async fn get_admin_analytics(&self) -> Result<AdminSessionsAnalytics, AppError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                COUNT(*)::BIGINT AS total_sessions,
+                COUNT(*) FILTER (WHERE status IN ('created', 'in_progress', 'completed'))::BIGINT AS launched_sessions,
+                COUNT(*) FILTER (WHERE status = 'completed')::BIGINT AS completed_sessions,
+                COUNT(*) FILTER (WHERE status IN ('created', 'in_progress'))::BIGINT AS active_sessions,
+                COUNT(*) FILTER (
+                    WHERE current_runtime_id IS NOT NULL
+                      AND status IN ('created', 'in_progress')
+                )::BIGINT AS active_runtimes,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')::BIGINT AS launches_last_7d,
+                COUNT(*) FILTER (
+                    WHERE completed_at >= NOW() - INTERVAL '7 days'
+                      AND status = 'completed'
+                )::BIGINT AS completions_last_7d
+            FROM lab_sessions
+            "#,
+        )
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let launched_sessions: i64 = row.try_get("launched_sessions").unwrap_or(0);
+        let completed_sessions: i64 = row.try_get("completed_sessions").unwrap_or(0);
+        let completion_rate = if launched_sessions > 0 {
+            completed_sessions as f64 / launched_sessions as f64
+        } else {
+            0.0
+        };
+
+        Ok(AdminSessionsAnalytics {
+            total_sessions: row.try_get("total_sessions").unwrap_or(0),
+            launched_sessions,
+            completed_sessions,
+            active_sessions: row.try_get("active_sessions").unwrap_or(0),
+            active_runtimes: row.try_get("active_runtimes").unwrap_or(0),
+            completion_rate,
+            launches_last_7d: row.try_get("launches_last_7d").unwrap_or(0),
+            completions_last_7d: row.try_get("completions_last_7d").unwrap_or(0),
+        })
     }
 
     fn runtime_namespace(runtime_kind: &str) -> &'static str {
@@ -512,6 +577,12 @@ impl SessionsService {
         lab_id: Uuid,
     ) -> Result<LearnerLabStatus, AppError> {
         let lab = self.fetch_lab_overview(lab_id).await?;
+        if lab.content_status.as_deref() == Some("archived") {
+            return Err(AppError::Forbidden(
+                "Archived labs cannot be followed".into(),
+            ));
+        }
+
         if lab.visibility.as_deref() != Some("PUBLIC") {
             return Err(AppError::Forbidden(
                 "Only public labs can be followed".into(),
@@ -763,6 +834,56 @@ impl SessionsService {
         Ok(body.data)
     }
 
+    async fn user_has_group_access_to_lab(
+        &self,
+        user_id: Uuid,
+        lab_id: Uuid,
+    ) -> Result<bool, AppError> {
+        let url = self
+            .groups_ms_base
+            .join(&format!(
+                "internal/access/lab?user_id={user_id}&lab_id={lab_id}"
+            ))
+            .map_err(|e| AppError::Internal(format!("Invalid Groups URL: {e}")))?;
+
+        let body = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| AppError::Internal("Groups MS unreachable".into()))?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| AppError::Internal("Invalid Groups response".into()))?;
+
+        Ok(body
+            .get("data")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false))
+    }
+
+    async fn ensure_lab_can_start(&self, user_id: Uuid, lab_id: Uuid) -> Result<(), AppError> {
+        let lab = self.fetch_lab_overview(lab_id).await?;
+
+        if lab.content_status.as_deref() == Some("archived") {
+            return Err(AppError::Forbidden(
+                "This lab is archived and cannot be started".into(),
+            ));
+        }
+
+        if lab.visibility.as_deref() == Some("PUBLIC") {
+            return Ok(());
+        }
+
+        if self.user_has_group_access_to_lab(user_id, lab_id).await? {
+            return Ok(());
+        }
+
+        Err(AppError::Forbidden(
+            "You are not allowed to start this private lab".into(),
+        ))
+    }
+
     /// Uses labs-ms as the source of truth for step count when rendering learner progress.
     async fn fetch_lab_steps_count(&self, lab_id: Uuid) -> Result<i32, AppError> {
         let url = self
@@ -837,6 +958,8 @@ impl SessionsService {
         lab_id: Uuid,
         track_learner_status: bool,
     ) -> Result<Session, AppError> {
+        self.ensure_lab_can_start(user_id, lab_id).await?;
+
         let mut tx = self
             .db
             .begin()

@@ -100,6 +100,22 @@ pub async fn get_admin_user_dashboard_labs(
     Ok(Json(ApiResponse::success(labs)))
 }
 
+pub async fn get_admin_sessions_analytics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<crate::services::sessions_service::AdminSessionsAnalytics>>, AppError>
+{
+    let caller = extract_caller(&headers)?;
+    if !is_admin(&caller) {
+        return Err(AppError::Forbidden(
+            "Admin role is required to inspect session analytics".into(),
+        ));
+    }
+
+    let analytics = state.sessions_service.get_admin_analytics().await?;
+    Ok(Json(ApiResponse::success(analytics)))
+}
+
 pub async fn get_sessions_by_lab(
     State(state): State<AppState>,
     Path(lab_id): Path<Uuid>,
