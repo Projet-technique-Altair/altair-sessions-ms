@@ -14,12 +14,17 @@ use crate::routes::{
         get_sessions_by_user, request_hint, start_session, stop_session, unfollow_lab,
         validate_step,
     },
+    staff::{
+        generate_group_ai_analysis, generate_student_ai_analysis, get_common_blockers,
+        get_group_activity, get_lab_analytics, get_student_activity,
+    },
 };
 
 pub mod health;
 pub mod internal;
 pub mod metrics;
 pub mod sessions;
+pub mod staff;
 
 pub fn init_routes() -> Router<AppState> {
     Router::new()
@@ -50,10 +55,36 @@ pub fn init_routes() -> Router<AppState> {
         // Public listings
         .route("/sessions/user/:id", get(get_sessions_by_user))
         .route("/sessions/lab/:id", get(get_sessions_by_lab))
+        // Staff / creator pedagogical analytics
+        .route("/staff/labs/:lab_id/analytics", get(get_lab_analytics))
+        .route(
+            "/staff/labs/:lab_id/students/:student_id/activity",
+            get(get_student_activity),
+        )
+        .route(
+            "/staff/labs/:lab_id/groups/:group_id/activity",
+            get(get_group_activity),
+        )
+        .route(
+            "/staff/labs/:lab_id/common-blockers",
+            get(get_common_blockers),
+        )
+        .route(
+            "/staff/labs/:lab_id/students/:student_id/ai-analysis",
+            post(generate_student_ai_analysis),
+        )
+        .route(
+            "/staff/labs/:lab_id/groups/:group_id/ai-analysis",
+            post(generate_group_ai_analysis),
+        )
         // For CRON
         .route(
             "/internal/cron/expire",
             post(internal::expire_sessions_cron),
+        )
+        .route(
+            "/internal/terminal-events",
+            post(internal::ingest_terminal_events),
         )
         // Internal runtime lookup used by lab-api-service to prepare the browser-facing
         // LAB-WEB session before redirecting the learner to the web app.

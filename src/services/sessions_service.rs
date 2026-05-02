@@ -13,6 +13,12 @@ use crate::{
     models::session::{Session, SessionRow},
 };
 
+mod staff_ai_activity_event_recording;
+mod staff_ai_activity_metrics;
+mod staff_ai_analysis_generation;
+mod staff_ai_group_access_checks;
+mod staff_ai_terminal_event_ingestion;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum ValidationType {
@@ -31,6 +37,9 @@ pub struct SessionsService {
     labs_ms_base: Url,
     /// URL for groups-ms (private access checks)
     groups_ms_base: Url,
+    /// URL for ia-ms (internal pedagogical analysis)
+    ia_ms_base: Url,
+    internal_worker_token: Option<String>,
 }
 
 use serde_json::Value;
@@ -104,6 +113,7 @@ struct LabApiResponse<T> {
 #[derive(Debug, Clone, Deserialize)]
 struct LabOverview {
     lab_id: Uuid,
+    creator_id: Uuid,
     name: String,
     description: Option<String>,
     difficulty: Option<String>,
@@ -111,8 +121,25 @@ struct LabOverview {
     visibility: Option<String>,
     content_status: Option<String>,
     lab_delivery: Option<String>,
+    objectives: Option<String>,
     estimated_duration: Option<String>,
     template_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GroupSummary {
+    group_id: Uuid,
+    creator_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+struct GroupMemberSummary {
+    user_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+struct GroupLabSummary {
+    lab_id: Uuid,
 }
 
 fn extract_runtime_app_port(
@@ -160,12 +187,20 @@ impl SessionsService {
 
         let groups_ms_base = Url::parse(&raw_groups).expect("Invalid GROUPS_MS_URL");
 
+        let raw_ia =
+            std::env::var("IA_MS_URL").unwrap_or_else(|_| "http://localhost:3011/".to_string());
+
+        let ia_ms_base = Url::parse(&raw_ia).expect("Invalid IA_MS_URL");
+        let internal_worker_token = std::env::var("INTERNAL_WORKER_TOKEN").ok();
+
         Self {
             db,
             client: Client::new(),
             lab_api_base,
             labs_ms_base,
             groups_ms_base,
+            ia_ms_base,
+            internal_worker_token,
         }
     }
 
@@ -429,6 +464,7 @@ impl SessionsService {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         session_id: Uuid,
+        user_id: Uuid,
         lab_id: Uuid,
     ) -> Result<(), AppError> {
         let url = self
@@ -480,6 +516,8 @@ impl SessionsService {
             .json(&serde_json::json!({
                 "session_id": session_id,
                 "runtime_id": runtime_id,
+                "user_id": user_id,
+                "lab_id": lab_id,
                 "lab_type": lab_type,
                 "template_path": template_path,
                 "lab_delivery": lab_delivery,
@@ -988,7 +1026,7 @@ impl SessionsService {
             let row = self.reconcile_runtime_row_in_tx(&mut tx, row).await?;
 
             if row.current_runtime_id.is_none() {
-                self.provision_runtime_for_session(&mut tx, session_id, lab_id)
+                self.provision_runtime_for_session(&mut tx, session_id, user_id, lab_id)
                     .await?;
             } else {
                 sqlx::query(
@@ -1090,7 +1128,7 @@ impl SessionsService {
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-            self.provision_runtime_for_session(&mut tx, session_id, lab_id)
+            self.provision_runtime_for_session(&mut tx, session_id, user_id, lab_id)
                 .await?;
 
             session_id
@@ -1422,10 +1460,10 @@ impl SessionsService {
 
         attempts[key.clone()] = serde_json::json!(new_attempts);
 
-        // 4️⃣ Charger lab_id
-        let lab_id = sqlx::query_scalar::<_, Uuid>(
+        // 4️⃣ Charger session metadata
+        let session_meta = sqlx::query(
             r#"
-            SELECT lab_id
+            SELECT lab_id, user_id
             FROM lab_sessions
             WHERE session_id = $1
             "#,
@@ -1434,6 +1472,12 @@ impl SessionsService {
         .fetch_one(&self.db)
         .await
         .map_err(|_| AppError::NotFound("Session not found".into()))?;
+        let lab_id: Uuid = session_meta
+            .try_get("lab_id")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let user_id: Uuid = session_meta
+            .try_get("user_id")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         // 5️⃣ Charger les steps depuis Labs MS
         let step = self.fetch_step_internal(lab_id, step_number).await?;
@@ -1509,6 +1553,18 @@ impl SessionsService {
                 .map(|r| r.is_match(&user_answer))
                 .unwrap_or(false),
         };
+
+        self.record_validation_event(
+            session_id,
+            user_id,
+            lab_id,
+            step_number,
+            new_attempts as i32,
+            &user_answer,
+            correct,
+            step["validation_type"].as_str().unwrap_or("unknown"),
+        )
+        .await?;
 
         // 7️⃣ Mise à jour DB
         if correct {
@@ -1593,10 +1649,10 @@ impl SessionsService {
             return Err(AppError::Conflict("Hint already used".into()));
         }
 
-        // 5️⃣ Charger lab_id
-        let lab_id = sqlx::query_scalar::<_, Uuid>(
+        // 5️⃣ Charger session metadata
+        let session_meta = sqlx::query(
             r#"
-            SELECT lab_id
+            SELECT lab_id, user_id
             FROM lab_sessions
             WHERE session_id = $1
             "#,
@@ -1605,6 +1661,12 @@ impl SessionsService {
         .fetch_one(&self.db)
         .await
         .map_err(|_| AppError::NotFound("Session not found".into()))?;
+        let lab_id: Uuid = session_meta
+            .try_get("lab_id")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let user_id: Uuid = session_meta
+            .try_get("user_id")
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         // 6️⃣ Charger les steps
         let step = self.fetch_step_internal(lab_id, step_number).await?;
@@ -1657,6 +1719,19 @@ impl SessionsService {
         .execute(&self.db)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let hint_id = hint["hint_id"]
+            .as_str()
+            .and_then(|value| Uuid::parse_str(value).ok());
+        self.record_hint_event(
+            session_id,
+            user_id,
+            lab_id,
+            step_number,
+            hint_id,
+            hint_number,
+        )
+        .await?;
 
         Ok((hint_text, cost, progress.score))
     }

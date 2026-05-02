@@ -1,4 +1,11 @@
-use crate::{error::AppError, models::api::ApiResponse, state::AppState};
+use crate::{
+    error::AppError,
+    models::{
+        api::ApiResponse,
+        staff_analysis::{TerminalEventsIngestRequest, TerminalEventsIngestResponse},
+    },
+    state::AppState,
+};
 use axum::{
     extract::{Path, State},
     Json,
@@ -44,4 +51,16 @@ pub async fn get_web_runtime(
         container_id: runtime.container_id,
         status: runtime.status,
     })))
+}
+
+pub async fn ingest_terminal_events(
+    State(state): State<AppState>,
+    Json(payload): Json<TerminalEventsIngestRequest>,
+) -> Result<Json<ApiResponse<TerminalEventsIngestResponse>>, AppError> {
+    let result = state
+        .sessions_service
+        .ingest_terminal_events(payload)
+        .await?;
+
+    Ok(Json(ApiResponse::success(result)))
 }

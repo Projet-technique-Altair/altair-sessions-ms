@@ -27,6 +27,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Unsupported lab type")]
+    UnsupportedLabType,
+
     #[error("Wrong answer")]
     WrongAnswer { attempts: i32 },
 }
@@ -40,6 +43,11 @@ impl IntoResponse for AppError {
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, "FORBIDDEN", msg),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT", msg),
+            AppError::UnsupportedLabType => (
+                StatusCode::BAD_REQUEST,
+                "unsupported_lab_type",
+                "Ce n'est pas possible pour le moment pour ce type de lab. Les rapports IA pédagogiques sont disponibles uniquement pour les labs terminal.".to_string(),
+            ),
             AppError::WrongAnswer { attempts } => (
                 StatusCode::BAD_REQUEST,
                 "WRONG_ANSWER",
