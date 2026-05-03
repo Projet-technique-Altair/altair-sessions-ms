@@ -1,3 +1,34 @@
+/**
+ * @file extractor — caller identity extraction.
+ *
+ * @remarks
+ * Provides helper logic used by route handlers to extract the authenticated
+ * caller from gateway-injected HTTP headers and normalize the caller role
+ * into a single service-level role.
+ *
+ * Responsibilities:
+ *
+ *  - Read the caller user ID from `x-altair-user-id`
+ *  - Parse the caller identifier as a UUID
+ *  - Read raw roles from `x-altair-roles`
+ *  - Normalize multiple raw roles into one effective role
+ *  - Reject requests with missing identity data
+ *  - Reject callers without a valid supported role
+ *
+ * Key characteristics:
+ *
+ *  - Trusts identity headers provided by the gateway layer
+ *  - Uses `admin` as the highest-priority role
+ *  - Falls back to `creator`, then `learner`
+ *  - Returns a compact `Caller` structure for service authorization
+ *  - Converts invalid authentication context into typed `AppError` values
+ *
+ * This module centralizes caller extraction so route handlers can rely on
+ * a consistent identity and authorization context.
+ *
+ * @packageDocumentation
+ */
+
 use crate::error::AppError;
 use axum::http::HeaderMap;
 use uuid::Uuid;

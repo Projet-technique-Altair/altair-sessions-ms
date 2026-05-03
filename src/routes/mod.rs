@@ -1,3 +1,35 @@
+/**
+ * @file mod — route registration.
+ *
+ * @remarks
+ * Registers all HTTP routes exposed by the Sessions microservice and
+ * maps each endpoint to its corresponding Axum handler.
+ *
+ * Responsibilities:
+ *
+ *  - Register health and metrics endpoints
+ *  - Register learner lab follow and dashboard routes
+ *  - Register admin analytics and user progress inspection routes
+ *  - Register session lifecycle routes
+ *  - Register progress, validation, hint, and completion routes
+ *  - Register session listing routes by user and lab
+ *  - Register internal cron and web runtime lookup routes
+ *
+ * Key characteristics:
+ *
+ *  - Uses Axum `Router<AppState>` for shared state injection
+ *  - Groups public, learner, admin, and internal endpoints
+ *  - Supports both `GET`, `POST`, and `DELETE` route methods
+ *  - Keeps route registration centralized in one module
+ *  - Delegates all business logic to dedicated route handlers
+ *
+ * This module defines the HTTP surface of the Sessions microservice by
+ * wiring route paths to handlers while keeping implementation details in
+ * specialized route modules.
+ *
+ * @packageDocumentation
+ */
+
 use axum::{
     routing::{get, post},
     Router,

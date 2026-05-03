@@ -1,3 +1,34 @@
+/**
+ * @file error — application error handling.
+ *
+ * @remarks
+ * Defines the domain-level error type used by the Sessions
+ * microservice and converts application errors into standardized
+ * HTTP JSON responses.
+ *
+ * Responsibilities:
+ *
+ *  - Represent common application errors with `AppError`
+ *  - Associate each error variant with the appropriate HTTP status code
+ *  - Convert errors into Axum responses through `IntoResponse`
+ *  - Return consistent API error payloads
+ *  - Generate response metadata for failed requests
+ *
+ * Key characteristics:
+ *
+ *  - Uses `thiserror` for readable error definitions
+ *  - Maps domain errors to explicit API error codes
+ *  - Preserves the shared `ApiErrorResponse` format
+ *  - Includes request metadata with UUID and timestamp
+ *  - Supports session-specific errors such as wrong answers
+ *
+ * This module centralizes error-to-response conversion so route
+ * handlers and services can return typed errors while keeping API
+ * responses consistent across the microservice.
+ *
+ * @packageDocumentation
+ */
+
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},

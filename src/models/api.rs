@@ -1,3 +1,34 @@
+/**
+ * @file api — standardized API response models.
+ *
+ * @remarks
+ * Defines the shared response structures used by the Sessions
+ * microservice to return consistent JSON payloads for both successful
+ * and failed requests.
+ *
+ * Responsibilities:
+ *
+ *  - Define common response metadata
+ *  - Define standardized API error payloads
+ *  - Define generic success response envelopes
+ *  - Define error response envelopes
+ *  - Generate request identifiers and timestamps
+ *  - Provide helper constructors for success and error responses
+ *
+ * Key characteristics:
+ *
+ *  - Uses a generic `ApiResponse<T>` for typed success payloads
+ *  - Uses `ApiErrorResponse` for structured failure payloads
+ *  - Attaches metadata to every API response
+ *  - Generates UUID-based request identifiers
+ *  - Uses UTC RFC3339 timestamps for traceability
+ *
+ * This module keeps the public API response format predictable and
+ * consistent across all Sessions microservice routes.
+ *
+ * @packageDocumentation
+ */
+
 use serde::Serialize;
 
 #[derive(Serialize)]

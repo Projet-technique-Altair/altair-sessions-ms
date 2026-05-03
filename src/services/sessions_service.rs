@@ -1,3 +1,45 @@
+/**
+ * @file sessions_service — sessions business service.
+ *
+ * @remarks
+ * Implements the main business logic of the Sessions microservice.
+ * This service coordinates lab session lifecycle management, learner
+ * progress tracking, runtime provisioning, step validation, hint usage,
+ * completion handling, and cross-service communication with Labs MS,
+ * Groups MS, and Lab API Service.
+ *
+ * Responsibilities:
+ *
+ *  - Start, resume, stop, expire, and complete lab sessions
+ *  - Provision lab runtimes through Lab API Service
+ *  - Persist and reconcile runtime state with database records
+ *  - Track learner lab status for dashboard usage
+ *  - Manage lab progress, completed steps, attempts, hints, and scores
+ *  - Validate learner answers using lab step definitions from Labs MS
+ *  - Fetch lab metadata, steps, hints, and creator information
+ *  - Check private lab access through Groups MS
+ *  - Compute admin analytics and learner dashboard progress
+ *  - Clean up expired runtimes and stale session state
+ *
+ * Key characteristics:
+ *
+ *  - Uses PostgreSQL as the source of truth for sessions and progress
+ *  - Uses Labs MS as the source of truth for lab metadata and steps
+ *  - Uses Groups MS for private lab authorization checks
+ *  - Uses Lab API Service for runtime container provisioning and status
+ *  - Separates product-level learner status from low-level runtime state
+ *  - Uses transactions for session/runtime lifecycle consistency
+ *  - Reconciles database state against actual runtime state when needed
+ *  - Supports both terminal and web lab delivery modes
+ *
+ * This module is the orchestration layer of the Sessions microservice:
+ * it connects persistence, runtime infrastructure, learner progress,
+ * authorization checks, and external microservice calls into one coherent
+ * session lifecycle.
+ *
+ * @packageDocumentation
+ */
+
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -64,7 +106,7 @@ pub struct WebRuntimeSession {
 }
 
 // =====================================
-// Résultat métier de validate-step
+// Results of validate-step
 // =====================================
 pub struct ValidateStepResult {
     pub correct: bool,

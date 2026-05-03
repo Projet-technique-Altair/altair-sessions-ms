@@ -1,10 +1,41 @@
+/**
+ * @file lab_progress — lab progress models.
+ *
+ * @remarks
+ * Defines the structures used to represent learner progress inside
+ * a lab session, from raw persisted progress data to the API-facing
+ * payload returned to the frontend.
+ *
+ * Responsibilities:
+ *
+ *  - Represent persisted lab progress rows from PostgreSQL
+ *  - Expose frontend-ready lab progress data
+ *  - Convert JSON progress aggregates into typed API fields
+ *  - Compute the total number of attempts across all steps
+ *  - Normalize used hints into a string list
+ *  - Attach computed runtime duration to the progress payload
+ *
+ * Key characteristics:
+ *
+ *  - Separates raw database representation from API output
+ *  - Stores step completion and scoring information
+ *  - Uses JSON fields for flexible hint and attempt tracking
+ *  - Converts persisted aggregates into simpler frontend fields
+ *  - Includes elapsed time as a computed value in seconds
+ *
+ * This module acts as the conversion layer between stored lab progress
+ * data and the simplified progress state consumed by the frontend.
+ *
+ * @packageDocumentation
+ */
+
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
 use uuid::Uuid;
 
-/// Représentation DB directe (sqlx)
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, FromRow)]
 pub struct LabProgressRow {
@@ -23,7 +54,7 @@ pub struct LabProgressRow {
     pub created_at: NaiveDateTime,
 }
 
-/// Représentation API exposée au frontend
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LabProgress {
     pub session_id: Uuid,

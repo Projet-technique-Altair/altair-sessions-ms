@@ -1,3 +1,33 @@
+/**
+ * @file internal — internal service route handlers.
+ *
+ * @remarks
+ * Defines internal endpoints used by backend services and scheduled jobs
+ * to manage runtime lifecycle operations that are not directly exposed as
+ * learner-facing API features.
+ *
+ * Responsibilities:
+ *
+ *  - Trigger expiration cleanup for outdated running sessions
+ *  - Return the number of sessions expired by the cleanup process
+ *  - Expose active web runtime mapping for a session
+ *  - Provide runtime information required by Lab API Service
+ *  - Wrap internal responses in the shared `ApiResponse` envelope
+ *
+ * Key characteristics:
+ *
+ *  - Uses shared `AppState` to access the Sessions service
+ *  - Supports cron-style cleanup of expired runtimes
+ *  - Returns UUID-based session and user identifiers
+ *  - Exposes container identifiers for LAB-WEB bootstrap flows
+ *  - Keeps internal orchestration endpoints separated from public routes
+ *
+ * This module acts as the internal HTTP boundary for scheduled cleanup
+ * and service-to-service runtime lookup operations.
+ *
+ * @packageDocumentation
+ */
+
 use crate::{error::AppError, models::api::ApiResponse, state::AppState};
 use axum::{
     extract::{Path, State},

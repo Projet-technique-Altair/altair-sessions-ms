@@ -1,3 +1,34 @@
+/**
+ * @file main — application entry point.
+ *
+ * @remarks
+ * Bootstraps the Sessions microservice by loading environment
+ * configuration, initializing shared application state, configuring
+ * middleware, registering HTTP routes, and starting the Axum server.
+ *
+ * Responsibilities:
+ *
+ *  - Load environment variables from `.env` when available
+ *  - Initialize the shared application state
+ *  - Configure CORS middleware from allowed origins
+ *  - Register application routes
+ *  - Attach shared state to the router
+ *  - Start the HTTP server on the configured port
+ *
+ * Key characteristics:
+ *
+ *  - Uses environment-driven configuration
+ *  - Supports configurable allowed frontend origins
+ *  - Provides default local development origins
+ *  - Exposes the service through an Axum HTTP server
+ *  - Uses a default port when no `PORT` variable is provided
+ *
+ * This module wires together the core Sessions MS components
+ * and starts the HTTP API used to manage session-related features.
+ *
+ * @packageDocumentation
+ */
+
 use axum::http::HeaderValue;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 

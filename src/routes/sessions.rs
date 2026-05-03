@@ -1,3 +1,42 @@
+/**
+ * @file sessions — session route handlers.
+ *
+ * @remarks
+ * Defines the HTTP handlers for the Sessions microservice. These routes
+ * expose session lifecycle operations, learner lab tracking, progress
+ * retrieval, step validation, hint requests, completion, and admin/creator
+ * inspection endpoints.
+ *
+ * Responsibilities:
+ *
+ *  - Extract caller identity and roles from request headers
+ *  - Enforce learner, owner, creator, and admin authorization rules
+ *  - Return session details with runtime step data
+ *  - Start, stop, and complete lab sessions
+ *  - Follow and unfollow labs from the learner dashboard
+ *  - Retrieve learner dashboard lab progress
+ *  - Retrieve session progress for a running lab
+ *  - Validate learner answers for lab steps
+ *  - Return hints for a given lab step
+ *  - Expose admin analytics and user progress inspection endpoints
+ *
+ * Key characteristics:
+ *
+ *  - Uses `AppState` to access the shared Sessions service
+ *  - Uses gateway-injected headers for authentication context
+ *  - Restricts learner-only features to callers with the learner role
+ *  - Restricts session progress and completion to the session owner
+ *  - Allows admins to inspect sessions and user progress
+ *  - Allows lab creators or admins to inspect sessions for a lab
+ *  - Wraps successful responses in the shared `ApiResponse` envelope
+ *
+ * This module acts as the HTTP boundary for session-related features,
+ * translating authenticated API requests into service-layer operations
+ * while enforcing route-level authorization.
+ *
+ * @packageDocumentation
+ */
+
 use axum::{
     extract::{Path, State},
     http::HeaderMap,

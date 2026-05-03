@@ -1,3 +1,34 @@
+/**
+ * @file learner_lab_status — learner lab progress models.
+ *
+ * @remarks
+ * Defines the learner-facing lab status models used to track whether
+ * a user has followed, started, or completed a lab independently from
+ * low-level runtime session states.
+ *
+ * Responsibilities:
+ *
+ *  - Represent learner-specific lab progress states
+ *  - Map raw database rows into typed learner lab status models
+ *  - Convert persisted status strings into `LearnerLabStatusKind`
+ *  - Validate database status values during conversion
+ *  - Store timestamps for follow, start, completion, and activity events
+ *  - Expose dashboard-ready lab progress payloads
+ *
+ * Key characteristics:
+ *
+ *  - Separates product-facing progress from runtime session lifecycle
+ *  - Uses strict enum conversion to prevent invalid DB states leaking downstream
+ *  - Links learner progress to the latest related session when available
+ *  - Includes lab metadata for dashboard display
+ *  - Provides progress information as an API-facing integer value
+ *
+ * This module acts as the typed boundary between persisted learner lab
+ * progress records and the dashboard/session features that consume them.
+ *
+ * @packageDocumentation
+ */
+
 use crate::error::AppError;
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
